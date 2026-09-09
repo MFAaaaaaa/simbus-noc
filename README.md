@@ -16,15 +16,15 @@
 
 ```text
 simbus_noc/
-├── include/simbus/       # 公共头文件
-├── src/                  # 路由表和 NoC 模型实现
-├── tests/                # 功能、拥塞与压力测试
-├── examples/             # NoC 性能基准程序
-├── scripts/              # 批量实验和绘图脚本
-├── plots/                # 示例实验图表
+├── noc/                  # 带背压的总线/NoC 模型
+│   ├── include/simbus/   # NoC 公共头文件
+│   ├── src/              # 路由表和 NoC 模型实现
+│   ├── tests/            # 功能、拥塞与压力测试
+│   ├── examples/         # NoC 性能基准程序
+│   ├── scripts/          # 批量实验和绘图脚本
+│   └── plots/            # 示例实验图表
 ├── rv64-archsem/         # 修改后的 RV64/RVV 指令语义库快照
 ├── rv64-manycore-sim/    # 众核 RV64+V 与 NoC 集成模拟器
-├── CMakeLists.txt
 └── README.md
 ```
 
@@ -59,22 +59,22 @@ cmake --build rv64-manycore-sim/build -j
 项目需要支持 C++17 的编译器和 CMake。
 
 ```bash
-cmake -S . -B build
-cmake --build build -j
-ctest --test-dir build --output-on-failure
+cmake -S noc -B noc/build
+cmake --build noc/build -j
+(cd noc/build && ctest --output-on-failure)
 ```
 
 较旧版本的 CTest 可以进入构建目录运行：
 
 ```bash
-cd build
+cd noc/build
 ctest --output-on-failure
 ```
 
 也可以直接执行测试程序：
 
 ```bash
-./build/simbus_noc_tests
+./noc/build/simbus_noc_tests
 ```
 
 当前测试覆盖 15 个测试项，包括路由生成、基本传输、多通道隔离、零长度消息、拥塞反压、吞吐限制和随机无丢包压力测试。
@@ -140,7 +140,7 @@ int main() {
 ## 性能基准
 
 ```bash
-./build/noc_benchmark \
+./noc/build/noc_benchmark \
   --topology mesh --nodes 16 --mesh-x 4 --mesh-y 4 \
   --pattern hotspot --offered-load 0.8 --ticks 10000 \
   --buffer-limit 8 --high-watermark 6 --low-watermark 2
@@ -153,14 +153,14 @@ int main() {
 启用有界缓冲与反压：
 
 ```bash
-./build/noc_benchmark --pattern hotspot --offered-load 0.8 \
+./noc/build/noc_benchmark --pattern hotspot --offered-load 0.8 \
   --congestion 1 --buffer-limit 8 --high-watermark 6 --low-watermark 2
 ```
 
 关闭拥塞控制：
 
 ```bash
-./build/noc_benchmark --pattern hotspot --offered-load 0.8 \
+./noc/build/noc_benchmark --pattern hotspot --offered-load 0.8 \
   --congestion 0 --buffer-limit 8 --high-watermark 6 --low-watermark 2
 ```
 
@@ -180,8 +180,8 @@ int main() {
 ## 批量实验与绘图
 
 ```bash
-./scripts/run_sweep.sh ./build/noc_benchmark noc_sweep.csv
-python3 ./scripts/plot_sweep.py noc_sweep.csv --out-dir plots
+./noc/scripts/run_sweep.sh ./noc/build/noc_benchmark noc/noc_sweep.csv
+python3 ./noc/scripts/plot_sweep.py noc/noc_sweep.csv --out-dir noc/plots
 ```
 
 绘图脚本会生成热点和均匀流量下的延迟、吞吐、阻塞周期、拥塞周期、送达比例和未送达消息等指标图。缺少 Matplotlib 时可运行：
@@ -192,4 +192,4 @@ python3 -m pip install matplotlib
 
 ## 许可证与来源
 
-本项目采用 MIT License。NoC 模型源自 `nullrvsim` 总线/网络模型的设计与代码演化，仓库保留了原项目的版权声明和许可证。使用或再分发时请同时保留 `LICENSE` 文件。
+NoC 模块采用 MIT License。NoC 模型源自 `nullrvsim` 总线/网络模型的设计与代码演化，仓库保留了原项目的版权声明和许可证。使用或再分发时请同时保留 `noc/LICENSE` 文件。
