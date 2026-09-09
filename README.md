@@ -1,6 +1,6 @@
 # simbus_noc
 
-`simbus_noc` 是一个独立的 C++17 片上网络（NoC）抽象模拟模块，源自 `nullrvsim/src/bus` 中总线与网络模型的设计思路。项目提供周期驱动的多通道 NoC、路由表生成、拥塞控制、压力测试和性能基准工具。
+`simbus_noc` 是一个 C++17 片上网络（NoC）抽象模拟模块，源自 `nullrvsim/src/bus` 中总线与网络模型的设计思路。项目提供周期驱动的多通道 NoC、路由表生成、拥塞控制、压力测试和性能基准工具。本仓库同时收录修改后的 `rv64-archsem` 指令语义库，以及基于二者构建的 `rv64-manycore-sim` 众核 RV64+V 拥塞模拟器，便于完整复现实验。
 
 ## 主要功能
 
@@ -22,9 +22,37 @@ simbus_noc/
 ├── examples/             # NoC 性能基准程序
 ├── scripts/              # 批量实验和绘图脚本
 ├── plots/                # 示例实验图表
+├── rv64-archsem/         # 修改后的 RV64/RVV 指令语义库快照
+├── rv64-manycore-sim/    # 众核 RV64+V 与 NoC 集成模拟器
 ├── CMakeLists.txt
 └── README.md
 ```
+
+## 众核 RV64+V 集成模拟器
+
+`rv64-manycore-sim` 将五个模块组合为一个确定性的逐周期系统：支持部分 RV64I/M 与 RVV 指令的 Atomic Hart、带背压的 NoC、共享内存、有限队列内存控制器和统一调度器。标量与向量 Load/Store 均通过 NoC，能够统计核心注入阻塞、内存等待、NoC 包延迟、内存队列占用和整体吞吐。
+
+仓库中的 `rv64-archsem` 基于其原仓库提交 `b26e726` 的工作副本，并保留了本项目使用的本地源码修改；其许可证见 `rv64-archsem/LICENSE`。
+
+构建完整众核模拟器：
+
+```bash
+cmake -S rv64-manycore-sim -B rv64-manycore-sim/build
+cmake --build rv64-manycore-sim/build -j
+(cd rv64-manycore-sim/build && ctest --output-on-failure)
+```
+
+运行一个可配置的拥塞实验：
+
+```bash
+./rv64-manycore-sim/build/rv64_manycore_sim \
+  rv64-manycore-sim/build/examples/vector_stream_private.bin \
+  --cores 8 --tohost 0x80001000 \
+  --link-width 4 --route-latency 3 --router-buffer 2 \
+  --memory-latency 8 --memory-queue 2 --max-ticks 2000000
+```
+
+更多指令范围、参数和批量扫描方法见 `rv64-manycore-sim/README.md`。
 
 ## 构建与测试
 
