@@ -33,7 +33,42 @@ cmake --build build -j
 (cd build && ctest --output-on-failure)
 ```
 
-运行演示：
+## 日常运行：统一修改run.ini
+
+构建后在 `rv64-manycore-sim/` 目录执行：
+
+```bash
+python3 run.py private     # 每核私有地址流；不带场景名时默认运行它
+python3 run.py hotspot     # 多核访问共享地址
+python3 run.py compute     # 向量访存之间插入计算间隔
+python3 run.py mmio        # MMIO总线读写
+python3 run.py all         # 依次运行上面四个场景
+python3 run.py sweep       # 三类RVV负载扫描1/2/4/8核，共12组
+```
+
+**日常参数统一在 [run.ini](run.ini) 修改，不需要重新编译。**
+
+| 配置段 | 用途 |
+|---|---|
+| `[run]` | 构建目录、每个场景的宿主运行超时 |
+| `[common]` | 所有场景继承的核心数、NoC、内存、指令周期参数 |
+| `[private]`、`[hotspot]`、`[compute]`、`[mmio]` | 程序名及该场景的参数覆盖 |
+| `[sweep]` | 扫描的核心数列表 |
+
+例如在 `[common]` 中修改 `cores = 8`、`memory-latency = 20` 就能改变公共实验条件。MMIO默认覆盖内存延迟为100、队列和接收额度为1；若要修改它，应编辑 `[mmio]` 中对应项。`sweep`按 `[sweep]` 列表决定核心数。
+
+临时覆盖核心数或只预览最终命令：
+
+```bash
+python3 run.py private --cores 8
+python3 run.py mmio --dry-run
+```
+
+终端每组只显示PASS/FAIL和总周期。每次运行自动创建独立的 `build/results/时间戳-随机后缀/`，保存 `results.csv`、逐组完整日志和实际参数快照 `configuration.json`，不会覆盖前次结果。需要Python3.7或更高版本，无第三方依赖。`--config`可选其他INI文件，`--build-dir`可选其他已构建目录；相对构建目录始终按run.py所在目录解析。修改源码仍需重新编译。
+
+## 高级运行入口
+
+原始命令行接口和脚本仍可用。运行底层脚本核心演示：
 
 ```bash
 ./build/manycore_demo
@@ -76,7 +111,7 @@ bash scripts/run_contention_sweep.sh build build/results/contention.csv
 
 脚本不会覆盖已有 CSV；需要保留历史结果时可为每轮实验指定新文件名。
 
-安装了 `riscv64-unknown-elf` 工具链时，构建过程会将裸机示例编译、链接并转换为raw binary，同时注册集成测试。工具链与Python3齐备时，当前共有10项CTest。也可以手动生成单个示例：
+安装了 `riscv64-unknown-elf` 工具链时，构建过程会将裸机示例编译、链接并转换为raw binary，同时注册集成测试。工具链与Python3齐备时，当前共有11项CTest，新增统一运行入口配置与结果保存验收。也可以手动生成单个示例：
 
 ```bash
 bash scripts/build_rv64_example.sh examples/tohost_smoke.S build/examples

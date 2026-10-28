@@ -60,31 +60,31 @@ cmake --build rv64-manycore-sim/build -j2
 
 CMake自动定位相邻的 `noc/` 和 `rv64-archsem/`。有交叉工具链时会将 `.S` 裸机示例编译、链接并转换为raw binary；没有工具链时跳过程序集成测试，不能将其视为完整验收。
 
-### 向量访存拥塞实验
+### 日常运行：一条短命令
 
 ```bash
-mkdir -p rv64-manycore-sim/build/results
-./rv64-manycore-sim/build/rv64_manycore_sim \
-  rv64-manycore-sim/build/examples/vector_stream_private.bin \
-  --cores 8 --tohost 0x80001000 \
-  --link-width 4 --route-latency 3 --router-buffer 2 \
-  --receive-slots 2 --memory-latency 8 --memory-queue 2 \
-  --max-ticks 2000000 --workload private \
-  --csv rv64-manycore-sim/build/results/private.csv
+cd rv64-manycore-sim
+python3 run.py private
 ```
 
-### MMIO总线读写示例
+**核心数、NoC、内存和指令周期统一在 [run.ini](rv64-manycore-sim/run.ini) 中修改，无需重新编译。** 默认4核；`[common]`是公共参数，各场景段可覆盖。统一入口需要Python3.7或更高版本。
+
+在同一目录也可以运行：
 
 ```bash
-./rv64-manycore-sim/build/rv64_manycore_sim \
-  rv64-manycore-sim/build/examples/mmio_bus_smoke.bin \
-  --cores 4 --tohost 0x80001000 --receive-slots 1 \
-  --memory-latency 100 --memory-queue 1
+python3 run.py hotspot     # 共享热点
+python3 run.py compute     # 计算间隔+向量访存
+python3 run.py mmio        # MMIO总线读写
+python3 run.py all         # 四个场景各运行一次
+python3 run.py sweep       # 三类RVV负载扫描1/2/4/8核，共12组
+python3 run.py private --cores 8  # 临时覆盖核心数
 ```
 
-示例逐Hart启动MMIO写、校验普通Load读回值，再启动MMIO读并核对结果，以 `tohost` 结束。
+终端每组显示PASS/FAIL和总周期；完整日志、CSV和实际配置快照自动写入独立的 `build/results/时间戳-随机后缀/`，不会覆盖历史结果。`--dry-run`仅预览最终命令。原始命令行仍可用，详见 [运行说明](rv64-manycore-sim/README.md)。
 
 ### 批量复现实验
+
+以下18组完整验收脚本从仓库根目录执行（如果仍在模拟器目录，先执行 `cd ..`）：
 
 ```bash
 bash rv64-manycore-sim/scripts/run_system_acceptance.sh \
@@ -102,6 +102,8 @@ bash rv64-manycore-sim/scripts/run_system_acceptance.sh \
 | 独立NoC | 1项CTest，内部15项测试全部通过 |
 | 众核系统 | 10/10项CTest通过，包含MMIO、额度、恢复、延迟与裸机测试 |
 | 系统实验 | 18/18组成功，原始CSV随仓库保存 |
+
+统一INI入口另有 `runner_ini_acceptance` 验收，覆盖参数继承、临时覆盖、短命令运行和历史结果保留；工具链与Python3齐备时，当前众核CTest总数为11。
 
 测试条件和逐规模结果见 [验收记录](rv64-manycore-sim/docs/acceptance-2026-10-28.md)，原始数据见 [实验CSV](rv64-manycore-sim/docs/results/2026-10-28/)。这些周期值来自简化模型，不是实际芯片性能测量。
 

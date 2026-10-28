@@ -155,6 +155,9 @@ if(MANYCORE_BUILD_TESTS)
     endforeach()
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
+      add_test(NAME runner_ini_acceptance
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_runner.py"
+                "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
       add_test(NAME cli_csv_acceptance
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli.py"
                 $<TARGET_FILE:rv64_manycore_sim> "${TOHOST_EXAMPLE_DIR}")
