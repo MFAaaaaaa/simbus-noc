@@ -7,9 +7,7 @@ namespace simbus {
 struct CongestionConfig {
     bool enabled = true;
 
-    // Router-local buffered packet count limit. This bounds packets already
-    // admitted into a router, including forwarding pipeline packets and packets
-    // waiting for reassembly at the destination node.
+    // Router-local forwarding pipeline packet count limit.
     uint32_t node_buffer_limit = 512;
 
     // Hysteresis watermarks. A node becomes congested at or above the high
@@ -27,11 +25,18 @@ struct NocConfig {
 
     CongestionConfig congestion;
 
+    // End-to-end reservations per destination port and channel, including
+    // messages in flight. Zero slots retains legacy unbounded reception.
+    uint32_t receive_message_slots = 0;
+    uint32_t max_message_bytes = 4096;
+
     bool enable_log = false;
 };
 
 struct NocStatistics {
     uint64_t tick = 0;
+    uint64_t destination_credit_stalls = 0;
+    uint64_t max_reserved_messages = 0;
     uint64_t transmitted_packets = 0;
     uint64_t received_messages = 0;
     uint64_t packet_latency_sum = 0;

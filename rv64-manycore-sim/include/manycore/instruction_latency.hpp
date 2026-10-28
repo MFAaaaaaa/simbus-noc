@@ -16,6 +16,7 @@ struct InstructionLatencyConfig {
   uint32_t fence = 1;
   uint32_t vector_config = 1;
   uint32_t vector_integer_alu = 4;
+  uint32_t vector_transaction_issue = 1;
 };
 
 uint32_t instruction_latency(const rv64archsem::DecodedInst& inst,

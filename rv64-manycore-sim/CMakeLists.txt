@@ -43,6 +43,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_library(manycore_sim
+  src/mmio_bus_adapter.cpp
   src/memory_protocol.cpp
   src/shared_memory.cpp
   src/memory_controller.cpp
@@ -72,6 +73,9 @@ if(MANYCORE_BUILD_TESTS)
   add_executable(manycore_tests tests/test_manycore.cpp)
   target_link_libraries(manycore_tests PRIVATE manycore::sim)
   add_test(NAME manycore_tests COMMAND manycore_tests)
+  add_executable(acceptance_tests tests/test_acceptance.cpp)
+  target_link_libraries(acceptance_tests PRIVATE manycore::sim)
+  add_test(NAME acceptance_tests COMMAND acceptance_tests)
 
   find_program(RISCV64_UNKNOWN_ELF_GCC riscv64-unknown-elf-gcc)
   find_program(RISCV64_UNKNOWN_ELF_OBJCOPY riscv64-unknown-elf-objcopy)
@@ -122,7 +126,7 @@ if(MANYCORE_BUILD_TESTS)
               "${VECTOR_MEMORY_EXAMPLE_BIN}" 4 0x80001000)
 
     set(VECTOR_CONTENTION_WORKLOADS
-        vector_stream_private vector_stream_hotspot vector_stream_gap)
+        vector_stream_private vector_stream_hotspot vector_stream_gap mmio_bus_smoke)
     set(VECTOR_CONTENTION_BINS)
     foreach(WORKLOAD IN LISTS VECTOR_CONTENTION_WORKLOADS)
       set(WORKLOAD_BIN "${TOHOST_EXAMPLE_DIR}/${WORKLOAD}.bin")
@@ -142,6 +146,19 @@ if(MANYCORE_BUILD_TESTS)
       COMMAND $<TARGET_FILE:rv64_manycore_sim>
               "${TOHOST_EXAMPLE_DIR}/vector_stream_private.bin"
               --cores 2 --tohost 0x80001000 --max-ticks 2000000)
+    foreach(WORKLOAD vector_stream_hotspot vector_stream_gap mmio_bus_smoke)
+      add_test(NAME rv64_${WORKLOAD}
+        COMMAND $<TARGET_FILE:rv64_manycore_sim>
+                "${TOHOST_EXAMPLE_DIR}/${WORKLOAD}.bin"
+                --cores 4 --tohost 0x80001000 --receive-slots 1
+                --memory-latency 30 --memory-queue 1 --max-ticks 2000000)
+    endforeach()
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+      add_test(NAME cli_csv_acceptance
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli.py"
+                $<TARGET_FILE:rv64_manycore_sim> "${TOHOST_EXAMPLE_DIR}")
+    endif()
   else()
     message(STATUS "RISC-V bare-metal toolchain not found; skipping compiled example")
   endif()

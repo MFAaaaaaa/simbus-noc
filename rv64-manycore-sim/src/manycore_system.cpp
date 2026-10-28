@@ -27,6 +27,7 @@ simbus::BusRouteTable ManycoreSystem::make_route(uint32_t core_count) {
 
 simbus::NocConfig ManycoreSystem::make_noc_config(const ManycoreConfig& config) {
   simbus::NocConfig noc;
+  noc.receive_message_slots = config.receive_message_slots;
   noc.link_width_byte = config.link_width_bytes;
   noc.route_latency = config.route_latency;
   noc.congestion.enabled = true;

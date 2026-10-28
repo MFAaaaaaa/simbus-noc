@@ -121,8 +121,11 @@ Rv64AtomicCore::Rv64AtomicCore(uint32_t hart_id, simbus::BusInterfaceV2& bus,
                                uint64_t stack_top,
                                std::optional<uint64_t> tohost_address)
     : hart_id_(hart_id), bus_(bus), port_(port), memory_port_(memory_port),
+      mmio_(hart_id, bus, port, memory_port),
       program_(program), latency_(latency), tohost_address_(tohost_address),
       pc_(program.base_address()) {
+  if (latency_.vector_transaction_issue == 0)
+    throw std::runtime_error("vector transaction issue latency must be non-zero");
   x_[2] = stack_top - static_cast<uint64_t>(hart_id) * 0x10000ull;
 }
 
@@ -168,6 +171,7 @@ void Rv64AtomicCore::write_csr(uint64_t address, uint64_t value) {
 }
 
 void Rv64AtomicCore::fetch_decode() {
+  ++stats_.fetch_decode_cycles;
   try {
     const uint16_t low = program_.fetch16(pc_);
     if ((low & 0x3u) != 0x3u) {
@@ -337,6 +341,7 @@ void Rv64AtomicCore::stage_next_vector_request() {
   }
   memory_request_ = std::move(request);
   ++stats_.vector_memory_transactions;
+  vector_issue_left_ = latency_.vector_transaction_issue - 1;
   state_ = Rv64CoreState::MemoryIssue;
 }
 
@@ -596,7 +601,9 @@ void Rv64AtomicCore::execute_ready_instruction() {
       case ControlType::csr: execute_csr(); commit(); break;
       case ControlType::fence:
       case ControlType::fencei:
-      case ControlType::fence_tso: commit(); break;
+      case ControlType::fence_tso:
+        if (mmio_.busy()) { ++stats_.adapter_serialization_wait_cycles; break; }
+        commit(); break;
       case ControlType::ecall: stop(static_cast<int>(x_[10]), "ecall"); break;
       case ControlType::ebreak: stop(0, "ebreak"); break;
       case ControlType::amo: throw std::runtime_error("AMO is not supported in this stage");
@@ -608,6 +615,35 @@ void Rv64AtomicCore::execute_ready_instruction() {
 }
 
 void Rv64AtomicCore::issue_memory_request() {
+  if (vector_issue_left_ > 0) {
+    --vector_issue_left_;
+    ++stats_.vector_issue_wait_cycles;
+    return;
+  }
+  // Only scalar LD/SD accesses the local control window. Vector accesses to
+  // this reserved region fault rather than accidentally touching RAM.
+  const auto& request = *memory_request_;
+  if (request.address < MmioBusAdapter::base + MmioBusAdapter::span &&
+      (request.address >= MmioBusAdapter::base ||
+       MmioBusAdapter::base - request.address < request.size)) {
+    try {
+      if (vector_memory_active_) throw std::runtime_error("vector MMIO is unsupported");
+      if (request.op == MemoryOp::Read) {
+        write_reg(load_rd_, mmio_.read(request.address, request.size));
+      } else {
+        uint64_t value = 0;
+        for (size_t i = 0; i < request.data.size(); ++i)
+          value |= uint64_t{request.data[i]} << (8 * i);
+        mmio_.write(request.address, request.size, value);
+      }
+      memory_request_.reset();
+      commit();
+    } catch (const std::exception& error) { fault(error.what()); }
+    return;
+  }
+  // The adapter has priority until its response is consumed. Local status
+  // polling still proceeds; normal and vector requests cannot steal responses.
+  if (mmio_.busy()) { ++stats_.adapter_serialization_wait_cycles; return; }
   if (!bus_.can_send(port_, kRequestChannel)) {
     ++stats_.injection_blocked_cycles;
     return;
@@ -691,6 +727,8 @@ void Rv64AtomicCore::fault(std::string reason) {
 }
 
 void Rv64AtomicCore::tick() {
+  try { mmio_.tick(); }
+  catch (const std::exception& error) { fault(error.what()); }
   if (finished()) return;
   ++stats_.ticks;
   switch (state_) {

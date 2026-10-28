@@ -1,5 +1,9 @@
 # rv64-manycore-sim
 
+本版本新增每 Hart 独立的 MMIO 总线控制窗口（`0x90000000`）、可配置的目的端完整消息接收额度，以及命令行指令延迟参数。接口地址表、使用约定、时序限制和统计含义详见 [MMIO与背压说明](docs/mmio-and-backpressure.md)。
+
+本次测试与18组实验原始结果见 [2026-10-28验收记录](docs/acceptance-2026-10-28.md)。
+
 一个独立的众核 RISC-V 时序模拟器项目。目标是组合：
 
 - `rv64-archsem`：RV64 与 V 扩展指令语义；
@@ -15,7 +19,7 @@
 
 ```text
 rv/
-├── bus-test/simbus_noc/     # NoC 库，不由本项目修改
+├── noc/                    # NoC 库，含转发背压与可选端到端额度
 ├── rv64-archsem/            # RV64+V 语义库，不由本项目修改
 └── rv64-manycore-sim/       # 本项目
 ```
@@ -23,10 +27,10 @@ rv/
 ## 构建
 
 ```bash
-cd /home/aii-works/rv/rv64-manycore-sim
+cd rv64-manycore-sim
 cmake -S . -B build \
-  -DSIMBUS_NOC_ROOT=/home/aii-works/rv/bus-test/simbus_noc \
-  -DRV64_ARCHSEM_ROOT=/home/aii-works/rv/rv64-archsem
+  -DSIMBUS_NOC_ROOT=../noc \
+  -DRV64_ARCHSEM_ROOT=../rv64-archsem
 cmake --build build -j
 (cd build && ctest --output-on-failure)
 ```
@@ -99,7 +103,7 @@ bash scripts/build_rv64_example.sh examples/tohost_smoke.S build/examples
 - RV64M 乘除法，并使用独立延迟
 - CSR 基础读写，包括只读 `cycle`、`instret`、`mhartid`
 - 标量整数 Load/Store
-- Fence 空操作提交
+- Fence 在本 Hart 访存与 MMIO 适配器排空后提交
 - `ecall`/`ebreak` 裸机停止
 - 经 NoC 的基础 `tohost` pass/fail 退出协议
 - 每 Hart 独立的 32×VLEN=256 位向量寄存器

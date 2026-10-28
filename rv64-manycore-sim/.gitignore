@@ -2,6 +2,7 @@
 /cmake-build-*/
 *.log
 *.csv
+!/docs/results/**/*.csv
 .vscode/
 .idea/
 

@@ -38,6 +38,7 @@ void MemoryController::start_request() {
 
 void MemoryController::advance_request() {
   if (!active_ || response_) return;
+  ++stats_.service_cycles;
   if (active_->cycles_left > 1) {
     --active_->cycles_left;
     return;
@@ -73,6 +74,7 @@ void MemoryController::send_response() {
 }
 
 void MemoryController::tick() {
+  stats_.queued_request_cycles += queue_.size();
   send_response();
   receive_request();
   advance_request();

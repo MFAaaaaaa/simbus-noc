@@ -1,6 +1,7 @@
 #pragma once
 
 #include "manycore/instruction_latency.hpp"
+#include "manycore/mmio_bus_adapter.hpp"
 #include "manycore/memory_protocol.hpp"
 #include "manycore/program_image.hpp"
 #include "simbus/symmulcha.h"
@@ -28,6 +29,9 @@ enum class Rv64CoreState {
 
 struct Rv64CoreStats {
   uint64_t ticks = 0;
+  uint64_t fetch_decode_cycles = 0;
+  uint64_t adapter_serialization_wait_cycles = 0;
+  uint64_t vector_issue_wait_cycles = 0;
   uint64_t retired_instructions = 0;
   uint64_t execute_wait_cycles = 0;
   uint64_t injection_blocked_cycles = 0;
@@ -67,6 +71,7 @@ class Rv64AtomicCore {
   int exit_code() const { return exit_code_; }
   const std::string& stop_reason() const { return stop_reason_; }
   const Rv64CoreStats& stats() const { return stats_; }
+  const MmioBusAdapter& mmio() const { return mmio_; }
 
  private:
   struct PendingInstruction {
@@ -107,6 +112,7 @@ class Rv64AtomicCore {
   simbus::BusInterfaceV2& bus_;
   simbus::BusPortT port_;
   simbus::BusPortT memory_port_;
+  MmioBusAdapter mmio_;
   const ProgramImage& program_;
   InstructionLatencyConfig latency_;
   std::optional<uint64_t> tohost_address_;
@@ -133,6 +139,7 @@ class Rv64AtomicCore {
   uint8_t load_rd_ = 0;
   rv64archsem::RDExtType load_extension_ = rv64archsem::RDExtType::zero;
   uint32_t cycles_left_ = 0;
+  uint32_t vector_issue_left_ = 0;
   uint32_t next_transaction_id_ = 1;
   int exit_code_ = 0;
   std::string stop_reason_;

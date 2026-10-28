@@ -30,6 +30,8 @@ SymmetricMultiChannelBus::~SymmetricMultiChannelBus() {
 void SymmetricMultiChannelBus::validate_config() const {
     require(cha_cnt_ > 0, "NoC needs at least one channel");
     require(link_width_byte_ > 0, "link_width_byte must be non-zero");
+    require(config_.receive_message_slots == 0 || config_.max_message_bytes > 0,
+            "bounded reception needs a non-zero message size limit");
     for (uint32_t c = 0; c < cha_widths_.size(); ++c) {
         require(cha_widths_[c] > 0, str_join("channel width must be non-zero: channel ", c));
         require(cha_widths_[c] <= 65536, str_join("channel width too large: channel ", c));
@@ -77,6 +79,7 @@ void SymmetricMultiChannelBus::build_network(
         (void)inserted;
         port_it->second.send_buf.resize(cha_cnt_);
         port_it->second.recv_buf.resize(cha_cnt_);
+        port_it->second.reserved.assign(cha_cnt_, 0);
         nodes_.at(node).port.emplace(port, &port_it->second);
     }
 
@@ -151,10 +154,24 @@ bool SymmetricMultiChannelBus::send(
         return false;
     }
 
+    if (config_.receive_message_slots != 0) {
+        require(data.size() <= config_.max_message_bytes,
+                "message exceeds bounded receive size limit");
+        if (ports_.at(dst_port).reserved[channel] >= config_.receive_message_slots) {
+            ++stats_.destination_credit_stalls;
+            return false;
+        }
+    }
+
     const uint32_t channel_width = cha_widths_[channel];
     const uint32_t padded_len = align_up(static_cast<uint32_t>(std::max<size_t>(data.size(), 1)), channel_width);
     const uint32_t pac_cnt = padded_len / channel_width;
     require(pac_cnt <= UINT16_MAX, "message is too large for 16-bit packet index/count fields");
+    if (config_.receive_message_slots != 0) {
+        auto& reservations = ports_.at(dst_port).reserved[channel];
+        ++reservations;
+        stats_.max_reserved_messages = std::max<uint64_t>(stats_.max_reserved_messages, reservations);
+    }
 
     PortStruct& p = ports_.at(port);
     std::list<MsgPack*>& sbuf = p.send_buf[channel];
@@ -234,7 +251,18 @@ bool SymmetricMultiChannelBus::recv(BusPortT port, ChannelT channel, std::vector
     out.resize(len);
     buf.swap(out);
     stats_.received_messages++;
+    if (config_.receive_message_slots != 0) {
+        auto& reservations = ports_.at(port).reserved[channel];
+        require(reservations > 0, "destination credit underflow");
+        --reservations;
+    }
     return true;
+}
+
+uint32_t SymmetricMultiChannelBus::reserved_messages(BusPortT port, ChannelT channel) const {
+    validate_port(port);
+    validate_channel(channel);
+    return ports_.at(port).reserved[channel];
 }
 
 void SymmetricMultiChannelBus::apply_next_tick() {
@@ -297,6 +325,8 @@ void SymmetricMultiChannelBus::print_setup_info(std::ostream& out) const {
     out << "channels: " << cha_cnt_ << '\n';
     out << "link_width_byte: " << link_width_byte_ << '\n';
     out << "route_latency: " << route_latency_ << '\n';
+    out << "receive_message_slots: " << config_.receive_message_slots << '\n';
+    out << "max_message_bytes: " << config_.max_message_bytes << '\n';
     out << "congestion.enabled: " << config_.congestion.enabled << '\n';
     out << "congestion.node_buffer_limit: " << config_.congestion.node_buffer_limit << '\n';
     for (const auto& [port, node] : port2node_) {
@@ -316,15 +346,16 @@ void SymmetricMultiChannelBus::print_statistics(std::ostream& out) const {
     out << "blocked_cycles: " << s.blocked_cycles << '\n';
     out << "congested_cycles: " << s.congested_cycles << '\n';
     out << "edge_busy_cycles: " << s.edge_busy_cycles << '\n';
+    out << "destination_credit_stalls: " << s.destination_credit_stalls << '\n';
+    out << "max_reserved_messages: " << s.max_reserved_messages << '\n';
 }
 
 bool SymmetricMultiChannelBus::can_accept_local_packet(NodeStruct& node) const {
     (void)node;
-    // Destination reassembly/receive buffers are intentionally unbounded,
-    // matching the original simulator simplification. Bounding them would
-    // deadlock multi-packet messages when the destination cannot assemble the
-    // full message before hitting the limit. Congestion control is therefore
-    // applied to forwarding/router pipeline buffers.
+    // Bounded mode reserves a whole message at send(), releasing only at
+    // recv(). Its packets must be admitted without an additional local packet
+    // limit so a partial message can always finish reassembly. Legacy mode is
+    // unbounded. Forwarding buffers remain independently bounded.
     return true;
 }
 

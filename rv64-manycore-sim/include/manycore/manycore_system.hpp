@@ -13,6 +13,7 @@ namespace manycore {
 
 struct ManycoreConfig {
   uint32_t core_count = 2;
+  uint32_t receive_message_slots = 2;
   uint32_t link_width_bytes = 16;
   uint32_t route_latency = 2;
   uint32_t router_buffer_limit = 8;

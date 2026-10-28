@@ -26,6 +26,8 @@ uint32_t instruction_latency(const rv64archsem::DecodedInst& inst,
         break;
       case ControlType::load:
       case ControlType::store:
+      case ControlType::vload:
+      case ControlType::vstore:
         value = config.memory_issue;
         break;
       case ControlType::csr:

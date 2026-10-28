@@ -20,6 +20,8 @@ public:
 
     void can_send(BusPortT port, std::vector<bool>& out) const override;
     bool can_send(BusPortT port, ChannelT channel) const override;
+    // can_send is source-local; send may additionally fail for destination
+    // credit exhaustion. Callers must retain and retry the complete message.
     bool send(BusPortT port, BusPortT dst_port, ChannelT channel, const std::vector<uint8_t>& data) override;
 
     void can_recv(BusPortT port, std::vector<bool>& out) const override;
@@ -34,6 +36,7 @@ public:
 
     uint32_t node_buffered_packets(BusNodeT node) const;
     bool node_congested(BusNodeT node) const;
+    uint32_t reserved_messages(BusPortT port, ChannelT channel) const;
 
     void print_setup_info(std::ostream& out) const;
     void print_statistics(std::ostream& out) const;
@@ -68,6 +71,7 @@ private:
     struct PortStruct {
         std::vector<std::list<MsgPack*>> recv_buf;
         std::vector<std::list<MsgPack*>> send_buf;
+        std::vector<uint32_t> reserved;
     };
 
     struct NodeStruct {

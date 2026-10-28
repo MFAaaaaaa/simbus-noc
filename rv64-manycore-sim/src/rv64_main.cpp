@@ -16,10 +16,12 @@ struct Options {
   std::string workload = "unspecified";
   std::optional<std::string> csv_path;
   manycore::ManycoreConfig config;
+  manycore::InstructionLatencyConfig latency;
   uint64_t max_ticks = 1000000;
 };
 
 uint64_t parse_unsigned(const std::string& text, const std::string& option) {
+  if (text.empty() || text.front() == '-') throw std::runtime_error("invalid value for " + option);
   size_t consumed = 0;
   const uint64_t value = std::stoull(text, &consumed, 0);
   if (consumed != text.size()) throw std::runtime_error("invalid value for " + option);
@@ -42,6 +44,10 @@ std::string usage(const char* executable) {
       << "  --link-width BYTES    NoC link width\n"
       << "  --route-latency N     NoC route latency in ticks\n"
       << "  --router-buffer N     router buffer limit\n"
+      << "  --receive-slots N     destination message credits per port/channel (0=legacy)\n"
+      << "  --lat-alu/--lat-mul/--lat-div N\n"
+      << "  --lat-branch/--lat-csr/--lat-memory/--lat-fence N\n"
+      << "  --lat-vconfig/--lat-valu/--lat-vtransaction N\n"
       << "  --memory-latency N    memory service latency in ticks\n"
       << "  --memory-queue N      memory request queue capacity\n"
       << "  --max-ticks N         simulation timeout\n"
@@ -70,6 +76,17 @@ Options parse_options(int argc, char** argv) {
     else if (argument == "--router-buffer") options.config.router_buffer_limit = parse_u32(value(), argument);
     else if (argument == "--memory-latency") options.config.memory_latency = parse_u32(value(), argument);
     else if (argument == "--memory-queue") options.config.memory_queue_capacity = parse_unsigned(value(), argument);
+    else if (argument == "--receive-slots") options.config.receive_message_slots = parse_u32(value(), argument);
+    else if (argument == "--lat-alu") options.latency.integer_alu = parse_u32(value(), argument);
+    else if (argument == "--lat-mul") options.latency.integer_multiply = parse_u32(value(), argument);
+    else if (argument == "--lat-div") options.latency.integer_divide = parse_u32(value(), argument);
+    else if (argument == "--lat-branch") options.latency.branch_jump = parse_u32(value(), argument);
+    else if (argument == "--lat-csr") options.latency.csr = parse_u32(value(), argument);
+    else if (argument == "--lat-memory") options.latency.memory_issue = parse_u32(value(), argument);
+    else if (argument == "--lat-fence") options.latency.fence = parse_u32(value(), argument);
+    else if (argument == "--lat-vconfig") options.latency.vector_config = parse_u32(value(), argument);
+    else if (argument == "--lat-valu") options.latency.vector_integer_alu = parse_u32(value(), argument);
+    else if (argument == "--lat-vtransaction") options.latency.vector_transaction_issue = parse_u32(value(), argument);
     else if (argument == "--max-ticks") options.max_ticks = parse_unsigned(value(), argument);
     else if (argument == "--workload") options.workload = value();
     else if (argument == "--csv") options.csv_path = value();
@@ -86,6 +103,11 @@ Options parse_options(int argc, char** argv) {
       throw std::runtime_error("unexpected positional argument: " + argument);
     }
   }
+  const auto& l = options.latency;
+  if (!l.integer_alu || !l.integer_multiply || !l.integer_divide || !l.branch_jump ||
+      !l.csr || !l.memory_issue || !l.fence || !l.vector_config ||
+      !l.vector_integer_alu || !l.vector_transaction_issue)
+    throw std::runtime_error("all instruction latencies must be non-zero");
   if (options.config.core_count == 0 || options.config.link_width_bytes == 0 ||
       options.config.route_latency == 0 || options.config.router_buffer_limit == 0 ||
       options.config.memory_latency == 0 || options.config.memory_queue_capacity == 0 ||
@@ -107,6 +129,13 @@ void append_csv(const std::string& path, const Options& options,
                 bool completed, bool success) {
   std::ifstream existing(path, std::ios::binary | std::ios::ate);
   const bool write_header = !existing || existing.tellg() == 0;
+  if (!write_header) {
+    existing.seekg(0);
+    std::string header;
+    std::getline(existing, header);
+    if (header.find("schema_version,receive_slots,") == std::string::npos)
+      throw std::runtime_error("CSV schema mismatch; choose a new result file");
+  }
   std::ofstream output(path, std::ios::app);
   if (!output) throw std::runtime_error("cannot open CSV output: " + path);
   if (write_header) {
@@ -117,11 +146,18 @@ void append_csv(const std::string& path, const Options& options,
               "vector_memory_transactions,noc_packets,noc_average_packet_latency,"
               "noc_blocked_cycles,memory_requests,memory_completed,"
               "memory_queue_full_cycles,memory_max_queue_depth,"
-              "transactions_per_tick\n";
+              "transactions_per_tick,schema_version,receive_slots,lat_alu,lat_mul,lat_div,"
+              "lat_branch,lat_csr,lat_memory,lat_fence,lat_vconfig,lat_valu,lat_vtransaction,"
+              "fetch_decode,adapter_serialization_wait,vector_issue_wait,mmio_commands,"
+              "mmio_completed,mmio_errors,mmio_injection_wait,mmio_response_wait,"
+              "destination_credit_stalls,max_reserved_messages,memory_queued_request_cycles,"
+              "memory_service_cycles,memory_response_injection_wait\n";
   }
   uint64_t retired = 0, execute_wait = 0, injection_blocked = 0, memory_wait = 0;
   uint64_t vector_config = 0, vector_alu = 0, vector_load = 0, vector_store = 0;
   uint64_t vector_transactions = 0;
+  uint64_t fetch = 0, serialization = 0, vector_issue = 0;
+  manycore::MmioBusAdapter::Stats mmio;
   for (uint32_t hart = 0; hart < options.config.core_count; ++hart) {
     const auto& stats = system.core(hart).stats();
     retired += stats.retired_instructions;
@@ -133,6 +169,13 @@ void append_csv(const std::string& path, const Options& options,
     vector_load += stats.vector_load_instructions;
     vector_store += stats.vector_store_instructions;
     vector_transactions += stats.vector_memory_transactions;
+    fetch += stats.fetch_decode_cycles;
+    serialization += stats.adapter_serialization_wait_cycles;
+    vector_issue += stats.vector_issue_wait_cycles;
+    const auto& m = system.core(hart).mmio().stats();
+    mmio.commands += m.commands; mmio.completed += m.completed;
+    mmio.errors += m.errors; mmio.injection_wait += m.injection_wait;
+    mmio.response_wait += m.response_wait;
   }
   const auto noc = system.noc().statistics();
   const auto& memory = system.memory_controller().stats();
@@ -151,7 +194,18 @@ void append_csv(const std::string& path, const Options& options,
          << ',' << std::setprecision(12) << noc.average_packet_latency() << ','
          << noc.blocked_cycles << ',' << memory.received_requests << ','
          << memory.completed_requests << ',' << memory.queue_full_cycles << ','
-         << memory.max_queue_depth << ',' << throughput << '\n';
+         << memory.max_queue_depth << ',' << throughput;
+  const auto& l = options.latency;
+  output << ",2," << options.config.receive_message_slots << ',' << l.integer_alu
+         << ',' << l.integer_multiply << ',' << l.integer_divide << ',' << l.branch_jump
+         << ',' << l.csr << ',' << l.memory_issue << ',' << l.fence << ',' << l.vector_config
+         << ',' << l.vector_integer_alu << ',' << l.vector_transaction_issue
+         << ',' << fetch << ',' << serialization << ',' << vector_issue
+         << ',' << mmio.commands << ',' << mmio.completed << ',' << mmio.errors
+         << ',' << mmio.injection_wait << ',' << mmio.response_wait
+         << ',' << noc.destination_credit_stalls << ',' << noc.max_reserved_messages
+         << ',' << memory.queued_request_cycles << ',' << memory.service_cycles
+         << ',' << memory.response_injection_blocked_cycles << '\n';
 }
 
 void print_results(const Options& options, const manycore::Rv64ManycoreSystem& system,
@@ -163,6 +217,14 @@ void print_results(const Options& options, const manycore::Rv64ManycoreSystem& s
     const auto& stats = core.stats();
     std::cout << "hart=" << i << " exit=" << core.exit_code()
               << " retired=" << stats.retired_instructions
+              << " fetch_decode=" << stats.fetch_decode_cycles
+              << " adapter_serialization_wait=" << stats.adapter_serialization_wait_cycles
+              << " vector_issue_wait=" << stats.vector_issue_wait_cycles
+              << " mmio_commands=" << core.mmio().stats().commands
+              << " mmio_completed=" << core.mmio().stats().completed
+              << " mmio_errors=" << core.mmio().stats().errors
+              << " mmio_injection_wait=" << core.mmio().stats().injection_wait
+              << " mmio_response_wait=" << core.mmio().stats().response_wait
               << " execute_wait=" << stats.execute_wait_cycles
               << " injection_blocked=" << stats.injection_blocked_cycles
               << " memory_wait=" << stats.memory_wait_cycles
@@ -178,11 +240,16 @@ void print_results(const Options& options, const manycore::Rv64ManycoreSystem& s
   const auto& memory = system.memory_controller().stats();
   std::cout << "noc_packets=" << noc.transmitted_packets
             << " noc_average_packet_latency=" << noc.average_packet_latency()
-            << " noc_blocked_cycles=" << noc.blocked_cycles << '\n';
+            << " noc_blocked_cycles=" << noc.blocked_cycles
+            << " destination_credit_stalls=" << noc.destination_credit_stalls
+            << " max_reserved_messages=" << noc.max_reserved_messages << '\n';
   std::cout << "memory_requests=" << memory.received_requests
             << " memory_completed=" << memory.completed_requests
             << " memory_queue_full_cycles=" << memory.queue_full_cycles
-            << " memory_max_queue_depth=" << memory.max_queue_depth << '\n';
+            << " memory_max_queue_depth=" << memory.max_queue_depth
+            << " memory_queued_request_cycles=" << memory.queued_request_cycles
+            << " memory_service_cycles=" << memory.service_cycles
+            << " memory_response_injection_wait=" << memory.response_injection_blocked_cycles << '\n';
 }
 
 }  // namespace
@@ -191,7 +258,7 @@ int main(int argc, char** argv) {
   try {
     const Options options = parse_options(argc, argv);
     auto image = manycore::ProgramImage::from_file(options.program_path);
-    manycore::Rv64ManycoreSystem system(std::move(image), options.config);
+    manycore::Rv64ManycoreSystem system(std::move(image), options.config, options.latency);
     const bool completed = system.run(options.max_ticks);
     const bool success = completed && system.program_succeeded();
     print_results(options, system, completed, success);

@@ -26,6 +26,7 @@ simbus::BusRouteTable Rv64ManycoreSystem::make_route(uint32_t core_count) {
 
 simbus::NocConfig Rv64ManycoreSystem::make_noc_config(const ManycoreConfig& config) {
   simbus::NocConfig noc;
+  noc.receive_message_slots = config.receive_message_slots;
   noc.link_width_byte = config.link_width_bytes;
   noc.route_latency = config.route_latency;
   noc.congestion.enabled = true;
@@ -59,7 +60,8 @@ void Rv64ManycoreSystem::tick() {
 }
 
 bool Rv64ManycoreSystem::finished() const {
-  for (const auto& core : cores_) if (!core->finished()) return false;
+  for (const auto& core : cores_)
+    if (!core->finished() || core->mmio().busy()) return false;
   return memory_controller_.idle();
 }
 

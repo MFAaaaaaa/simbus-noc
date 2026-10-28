@@ -21,6 +21,8 @@ struct MemoryControllerStats {
   uint64_t completed_requests = 0;
   uint64_t response_injection_blocked_cycles = 0;
   uint64_t queue_full_cycles = 0;
+  uint64_t queued_request_cycles = 0;
+  uint64_t service_cycles = 0;
   size_t max_queue_depth = 0;
 };
 
