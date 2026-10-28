@@ -15,12 +15,12 @@
 
 ## 目录关系
 
-本项目独立于 `bus-test`：
+在组合仓库中，三个模块并列放置，CMake自动发现相邻依赖：
 
 ```text
 rv/
 ├── noc/                    # NoC 库，含转发背压与可选端到端额度
-├── rv64-archsem/            # RV64+V 语义库，不由本项目修改
+├── rv64-archsem/            # 修改后的 RV64+V 语义库快照
 └── rv64-manycore-sim/       # 本项目
 ```
 
@@ -28,9 +28,7 @@ rv/
 
 ```bash
 cd rv64-manycore-sim
-cmake -S . -B build \
-  -DSIMBUS_NOC_ROOT=../noc \
-  -DRV64_ARCHSEM_ROOT=../rv64-archsem
+cmake -S . -B build
 cmake --build build -j
 (cd build && ctest --output-on-failure)
 ```
@@ -52,6 +50,7 @@ cmake --build build -j
 也可以使用具名参数配置实验，并把聚合统计追加到 CSV：
 
 ```bash
+mkdir -p build/results
 ./build/rv64_manycore_sim build/examples/vector_stream_private.bin \
   --cores 4 --tohost 0x80001000 \
   --link-width 4 --route-latency 3 --router-buffer 2 \
@@ -59,7 +58,7 @@ cmake --build build -j
   --workload vector_stream_private --csv build/results/private.csv
 ```
 
-可配置项覆盖核心数、链路宽度、路由延迟、路由缓冲、内存延迟、内存队列和最大模拟周期。CSV 包含完成状态、总周期、各类核心等待周期、RVV 指令/事务数、NoC 包延迟与阻塞周期，以及内存队列吞吐统计。
+可配置项覆盖核心数、链路宽度、路由延迟、路由缓冲、内存延迟、内存队列和最大模拟周期。`--receive-slots`控制目的端消息额度，默认2；`--lat-alu`、`--lat-mul`、`--lat-div`、`--lat-valu`等设置指令类别周期，完整列表见接口说明。CSV schema版本2包含配置、完成状态、Hart等待、RVV事务、MMIO、NoC与内存服务统计；不能追加到旧版CSV。
 
 ## 拥塞实验负载
 
@@ -77,7 +76,7 @@ bash scripts/run_contention_sweep.sh build build/results/contention.csv
 
 脚本不会覆盖已有 CSV；需要保留历史结果时可为每轮实验指定新文件名。
 
-服务器安装了 `riscv64-unknown-elf` 工具链时，构建过程会把 `examples/tohost_smoke.S` 编译、链接并转换为 raw binary，同时注册一项 4 核 CTest。也可以手动生成：
+安装了 `riscv64-unknown-elf` 工具链时，构建过程会将裸机示例编译、链接并转换为raw binary，同时注册集成测试。工具链与Python3齐备时，当前共有10项CTest。也可以手动生成单个示例：
 
 ```bash
 bash scripts/build_rv64_example.sh examples/tohost_smoke.S build/examples
@@ -89,13 +88,25 @@ bash scripts/build_rv64_example.sh examples/tohost_smoke.S build/examples
 ## 当前时序规则
 
 - 全局模拟采用单线程、确定性的逐周期调度。
-- 每个核心最多有一个未完成内存事务。
+- 每个核心普通及向量访存最多有一个未完成事务；MMIO适配器也只保留一个目标事务，并与普通访存串行使用端口。
 - 核心先完成固定计算周期，再尝试向 NoC 注入请求。
-- `can_send()` 为 false 时累计注入阻塞周期。
+- `can_send()`或`send()`失败时累计注入阻塞周期，包含源端背压和目的端无接收额度。
 - 请求发出后，核心暂停，直到匹配的响应返回。
 - 内存控制器使用有界队列和固定服务周期。
 - NoC channel 0 传请求，channel 1 传响应。
 - 同一 tick 发出的请求不会在同一 tick 返回。
+
+## MMIO总线访问与结束协议
+
+每Hart独立控制窗口位于 `0x90000000`，使用对齐的64位LD/SD访问地址、数据、宽度、命令、状态和结果寄存器。写COMMAND启动的目标读写才进入NoC；本地控制寄存器访问不经过NoC。适配器忙时可以执行本地计算和状态轮询，普通访存与Fence等待它完成。
+
+```bash
+./build/rv64_manycore_sim build/examples/mmio_bus_smoke.bin \
+  --cores 4 --tohost 0x80001000 --receive-slots 1 \
+  --memory-latency 100 --memory-queue 1
+```
+
+MMIO控制窗口与 `tohost` 不同：前者用于启动读写，后者用于裸机测试通过/失败上报。当前没有使用自定义CSR发起总线事务。完整地址表见 [接口说明](docs/mmio-and-backpressure.md)。
 
 ## 已支持的 RV64 范围
 
@@ -117,11 +128,15 @@ bash scripts/build_rv64_example.sh examples/tohost_smoke.S build/examples
 
 服务器的 binutils 2.34 早于 RVV 1.0 汇编语法，`examples/vector_alu_smoke.S` 因此使用带指令名称注释的 `.word` 编码。生成的 raw binary 仍由真实交叉编译、链接和 objcopy 流程产生。
 
-当前 `rv64-archsem` 的单位步长 descriptor 会给每个元素返回相同基础地址；本项目不修改该库，而是在适配层使用 descriptor 的寄存器偏移恢复连续地址，并按 8 字节边界重新合并。对应行为由 `vector_memory_smoke` 集成测试覆盖。
+当前 `rv64-archsem` 的单位步长descriptor会给每个元素返回相同基础地址；这一问题在模拟器适配层通过恢复连续地址并按8字节边界重新合并处理，不需要进一步修改库。对应行为由 `vector_memory_smoke` 集成测试覆盖。
 
-## 下一阶段
+## 当前限制与后续方向
+
+当前仅有一个内存控制器和一个活动服务请求，没有Cache、多Bank或一致性。Private与Hotspot共用同一个内存服务端点，地址不同本身不会增加或减少Bank冲突代价。Compute Gap只是插入计算间隔，没有DMA双缓冲。目的端额度检查即时生效，没有硬件额度返回延迟模型。
+
+以下为可选扩展方向，尚未作为当前完成能力：
 
 1. 基于 CSV 扫描核心数和 NoC/内存参数，定位吞吐拐点与主要阻塞来源。
 2. 支持分数 LMUL、widen/narrow 和更多整数向量指令。
 3. 扩展 strided/indexed/segment/whole-register RVV 访存。
-4. 接入浮点、通用 MMIO、AMO/LR/SC 和更多性能计数 CSR。
+4. 接入浮点、更多MMIO外设、AMO/LR/SC 和更多性能计数 CSR。

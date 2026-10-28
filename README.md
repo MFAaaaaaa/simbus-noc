@@ -1,197 +1,120 @@
-# simbus_noc
+# simbus-noc：众核 RV64+V 总线拥塞模拟系统
 
-`simbus_noc` 是一个 C++17 片上网络（NoC）抽象模拟模块，源自 `nullrvsim/src/bus` 中总线与网络模型的设计思路。项目提供周期驱动的多通道 NoC、路由表生成、拥塞控制、压力测试和性能基准工具。本仓库同时收录修改后的 `rv64-archsem` 指令语义库，以及基于二者构建的 `rv64-manycore-sim` 众核 RV64+V 拥塞模拟器，便于完整复现实验。
+本项目将支持部分 RV64I/M 与 V 扩展指令的 Atomic Hart、带背压的 NoC 和共享内存集成为一个逐周期模拟器，用于研究多核访存竞争、请求排队、网络阻塞和核心停顿。
 
-## 主要功能
+核心按指令类别使用预设执行周期。多个 Hart 在模拟时间上并发运行；模拟器使用单线程、确定性的全局 tick 推进状态。项目定位为可运行裸机程序的系统级拥塞实验基线。
 
-- `BusInterfaceV2`：基于端口和通道的发送/接收接口
-- 单环、双环、二维 Mesh XY 路由表生成
-- `SymmetricMultiChannelBus`：周期驱动的对称多通道 NoC
-- 有界路由器缓冲区，以及基于高低水位线的拥塞检测与反压
-- 多种拓扑和流量模式的性能基准
-- 基于 CTest 的功能测试与随机压力测试
-- CSV 批量实验和 Python 绘图工具
-
-## 目录结构
+## 代码组成
 
 ```text
-simbus_noc/
-├── noc/                  # 带背压的总线/NoC 模型
-│   ├── include/simbus/   # NoC 公共头文件
-│   ├── src/              # 路由表和 NoC 模型实现
-│   ├── tests/            # 功能、拥塞与压力测试
-│   ├── examples/         # NoC 性能基准程序
-│   ├── scripts/          # 批量实验和绘图脚本
-│   └── plots/            # 示例实验图表
-├── rv64-archsem/         # 修改后的 RV64/RVV 指令语义库快照
-├── rv64-manycore-sim/    # 众核 RV64+V 与 NoC 集成模拟器
+simbus-noc/
+├── noc/                  # NoC、路由、背压、独立网络测试与基准
+├── rv64-archsem/         # 修改后的 RV64/RVV 指令解码与语义库
+├── rv64-manycore-sim/    # Atomic Hart、内存、MMIO与系统调度
 └── README.md
 ```
 
-## 众核 RV64+V 集成模拟器
+| 模块 | 职责 |
+|---|---|
+| [noc](noc/README.md) | 分包/重组、路由、有限转发缓冲、水位背压与可选目的端接收额度；可独立构建 |
+| [rv64-archsem](rv64-archsem/README.md) | 指令解码、运算语义和访存描述生成；收录修改后的源码快照 |
+| [rv64-manycore-sim](rv64-manycore-sim/README.md) | 组合核心、NoC和内存，加载裸机程序，记录时序与阻塞；依赖前两个目录 |
 
-当前还提供程序可见的 MMIO 总线控制窗口、按目的端口/通道预留的完整消息额度，以及固定指令类别延迟的命令行配置。详见 [接口与背压模型](rv64-manycore-sim/docs/mmio-and-backpressure.md)。
+## 系统架构与能力
 
-`rv64-manycore-sim` 将五个模块组合为一个确定性的逐周期系统：支持部分 RV64I/M 与 RVV 指令的 Atomic Hart、带背压的 NoC、共享内存、有限队列内存控制器和统一调度器。标量与向量 Load/Store 均通过 NoC，能够统计核心注入阻塞、内存等待、NoC 包延迟、内存队列占用和整体吞吐。
+```text
+多个 RV64+V Atomic Hart
+    │ 普通标量/向量访存，或MMIO适配器发起的目标事务
+    ↕
+带背压的 NoC（通道0：请求；通道1：响应）
+    ↕
+内存控制器（有限请求队列、固定服务周期）
+    ↕
+共享内存（稀疏字节存储）
 
-仓库中的 `rv64-archsem` 基于其原仓库提交 `b26e726` 的工作副本，并保留了本项目使用的本地源码修改；其许可证见 `rv64-archsem/LICENSE`。
+统一逐周期调度器推进上述模块并收集统计
+```
 
-构建完整众核模拟器：
+- 可配置Hart数量，已验证1/2/4/8 Hart；每Hart有独立PC、整数/向量寄存器、CSR和 `mhartid`。
+- 支持RV64整数计算、分支、标量访存、乘除法和基础CSR；所有Hart使用同一份本地只读程序镜像，取指不产生NoC流量。
+- RVV子集：VLEN=256、SEW=8/16/32/64、LMUL=m1/m2/m4/m8；向量配置、基础整数加减/最值/逻辑/搬移，以及EEW=SEW的无掩码单位步长访存。
+- 指令类别延迟可配置：整数ALU默认1周期、乘法3周期、除法18周期、向量整数ALU4周期；取指、请求准备和动态等待另计。
+- 每Hart在 `0x90000000` 有独立MMIO控制窗口，可设置地址、数据和大小、启动总线读写并查询结果；未采用自定义CSR发起总线请求。
+- NoC库支持单环、双环、二维Mesh XY路由；当前众核系统使用双环。转发缓冲采用水位背压，众核默认每个目的端口/通道预留2条完整消息的接收额度。
+- `tohost` 特殊地址协议负责裸机程序通过/失败上报，与MMIO总线控制窗口是不同接口。
+- 输出每Hart统计及聚合CSV，覆盖执行、注入阻塞、响应等待、MMIO、NoC和内存队列指标。
+
+完整地址表、延迟参数与统计口径见 [MMIO与背压说明](rv64-manycore-sim/docs/mmio-and-backpressure.md)。
+
+## 快速开始
+
+以下命令在Linux环境、仓库根目录执行。独立NoC需要C++17；完整系统需要C++20编译器、CMake和bash。裸机示例需要 `riscv64-unknown-elf-gcc`、`riscv64-unknown-elf-objcopy` 和 `riscv64-unknown-elf-nm`。Python3用于可选的CLI/CSV端到端测试。
+
+### 构建与测试
 
 ```bash
 cmake -S rv64-manycore-sim -B rv64-manycore-sim/build
-cmake --build rv64-manycore-sim/build -j
+cmake --build rv64-manycore-sim/build -j2
 (cd rv64-manycore-sim/build && ctest --output-on-failure)
 ```
 
-运行一个可配置的拥塞实验：
+CMake自动定位相邻的 `noc/` 和 `rv64-archsem/`。有交叉工具链时会将 `.S` 裸机示例编译、链接并转换为raw binary；没有工具链时跳过程序集成测试，不能将其视为完整验收。
+
+### 向量访存拥塞实验
 
 ```bash
+mkdir -p rv64-manycore-sim/build/results
 ./rv64-manycore-sim/build/rv64_manycore_sim \
   rv64-manycore-sim/build/examples/vector_stream_private.bin \
   --cores 8 --tohost 0x80001000 \
   --link-width 4 --route-latency 3 --router-buffer 2 \
-  --memory-latency 8 --memory-queue 2 --max-ticks 2000000
+  --receive-slots 2 --memory-latency 8 --memory-queue 2 \
+  --max-ticks 2000000 --workload private \
+  --csv rv64-manycore-sim/build/results/private.csv
 ```
 
-更多指令范围、参数和批量扫描方法见 `rv64-manycore-sim/README.md`。
-
-## 构建与测试
-
-项目需要支持 C++17 的编译器和 CMake。
+### MMIO总线读写示例
 
 ```bash
-cmake -S noc -B noc/build
-cmake --build noc/build -j
-(cd noc/build && ctest --output-on-failure)
+./rv64-manycore-sim/build/rv64_manycore_sim \
+  rv64-manycore-sim/build/examples/mmio_bus_smoke.bin \
+  --cores 4 --tohost 0x80001000 --receive-slots 1 \
+  --memory-latency 100 --memory-queue 1
 ```
 
-较旧版本的 CTest 可以进入构建目录运行：
+示例逐Hart启动MMIO写、校验普通Load读回值，再启动MMIO读并核对结果，以 `tohost` 结束。
+
+### 批量复现实验
 
 ```bash
-cd noc/build
-ctest --output-on-failure
+bash rv64-manycore-sim/scripts/run_system_acceptance.sh \
+  rv64-manycore-sim/build rv64-manycore-sim/build/results/acceptance
 ```
 
-也可以直接执行测试程序：
+脚本运行三类RVV负载的1/2/4/8核扫描、四组MMIO读写和两组接收额度对照，共18组。已有结果目录不会被覆盖。CSV使用schema版本2，不能与旧版结果混合追加。独立网络构建、基准与绘图见 [NoC使用说明](noc/README.md)。
 
-```bash
-./noc/build/simbus_noc_tests
-```
+## 验证结果
 
-当前测试覆盖 15 个测试项，包括路由生成、基本传输、多通道隔离、零长度消息、拥塞反压、吞吐限制和随机无丢包压力测试。
+2026-10-28在服务器完成的验证：
 
-## 最小使用示例
+| 验证 | 结果 |
+|---|---|
+| 独立NoC | 1项CTest，内部15项测试全部通过 |
+| 众核系统 | 10/10项CTest通过，包含MMIO、额度、恢复、延迟与裸机测试 |
+| 系统实验 | 18/18组成功，原始CSV随仓库保存 |
 
-```cpp
-#include "simbus/symmulcha.h"
+测试条件和逐规模结果见 [验收记录](rv64-manycore-sim/docs/acceptance-2026-10-28.md)，原始数据见 [实验CSV](rv64-manycore-sim/docs/results/2026-10-28/)。这些周期值来自简化模型，不是实际芯片性能测量。
 
-using namespace simbus;
+## 负载与模型限制
 
-int main() {
-    std::vector<BusNodeT> nodes{0, 1, 2, 3};
-    BusRouteTable route;
-    genroute_double_ring(nodes, route);
+三类RVV负载均执行64轮“加载8个32位元素—每元素加1—存回”：Private使用每Hart私有地址，Hotspot使用共享地址，Compute Gap在每轮之间插入标量计算间隔。Compute Gap是计算与访存交替，不是DMA双缓冲或计算访存重叠。
 
-    NocConfig cfg;
-    cfg.link_width_byte = 8;
-    cfg.route_latency = 2;
-    cfg.congestion.enabled = true;
-    cfg.congestion.node_buffer_limit = 16;
-    cfg.congestion.high_watermark = 12;
-    cfg.congestion.low_watermark = 4;
+- 单内存控制器、单活动服务请求，没有Cache、多Bank或一致性；Private与Hotspot没有额外的地址冲突时序差异。
+- 每Hart普通/向量访存最多一个未完成事务，向量子事务串行发送。MMIO适配器也只保留一个目标事务；它忙时可继续本地计算和状态轮询，普通访存等待排空。
+- RVV是受限子集，没有分数LMUL、浮点、索引/分段访存，也没有AMO/LR/SC、虚拟内存和完整操作系统环境。
+- 目的端额度属于简化接纳控制，额度检查即时可见，没有硬件额度返回延迟；测试通过不代表对任意拓扑的无死锁证明。
+- Hart等待与NoC节点阻塞是累计量，可能大于全局模拟周期；不能将所有指标直接相加。
 
-    SymmetricMultiChannelBus bus({0, 1, 2, 3}, nodes, {4}, route, cfg);
+## 来源与许可证
 
-    std::vector<uint8_t> payload{1, 2, 3, 4, 5};
-    bus.send(0, 2, 0, payload);
-
-    while (!bus.can_recv(2, 0)) {
-        bus.apply_next_tick();
-    }
-
-    std::vector<uint8_t> received;
-    bus.recv(2, 0, received);
-}
-```
-
-## 拥塞控制模型
-
-当前拥塞控制采用有界缓冲与反压机制：
-
-1. 每个路由器维护有界的数据包缓冲计数。
-2. 数据包进入中间路由器的转发流水线时占用一个缓冲槽。
-3. 独立NoC默认保留无界接收；众核系统默认启用完整消息接收额度，发送时预留、应用接收时释放，从而限制目的端积压并允许整条多包消息完成重组。
-4. 如果接收转发数据包将超过缓冲上限，节点不会从上游链路输出或本地发送缓冲区取走该数据包。
-5. 上游输出被占用后，反压会沿链路逐级传播。
-6. 高、低水位线用于避免 `can_send()` 在临界点附近频繁振荡。
-
-## 测试内容
-
-- `test_routetable.cpp`：单环、双环、二维 Mesh XY 路由和非法节点检查
-- `test_basic_transfer.cpp`：同节点、跨节点、多通道、零长度消息和填充移除
-- `test_congestion.cpp`：反压与恢复、延迟、吞吐限制和源节点发送门控
-- `test_stress.cpp`：普通与小缓冲区条件下的随机无丢包检查
-
-成功时输出：
-
-```text
-[SUMMARY] 15 tests passed
-```
-
-## 性能基准
-
-```bash
-./noc/build/noc_benchmark \
-  --topology mesh --nodes 16 --mesh-x 4 --mesh-y 4 \
-  --pattern hotspot --offered-load 0.8 --ticks 10000 \
-  --buffer-limit 8 --high-watermark 6 --low-watermark 2
-```
-
-程序输出一行 CSV，包含注入与送达消息数、平均包延迟、吞吐量、阻塞/拥塞周期、源节点阻塞消息数、未送达与在途消息数，以及排空阶段是否超时。
-
-### 拥塞控制对比
-
-启用有界缓冲与反压：
-
-```bash
-./noc/build/noc_benchmark --pattern hotspot --offered-load 0.8 \
-  --congestion 1 --buffer-limit 8 --high-watermark 6 --low-watermark 2
-```
-
-关闭拥塞控制：
-
-```bash
-./noc/build/noc_benchmark --pattern hotspot --offered-load 0.8 \
-  --congestion 0 --buffer-limit 8 --high-watermark 6 --low-watermark 2
-```
-
-## 拓扑与流量模式
-
-支持的拓扑：
-
-- `mesh`：二维 Mesh XY 路由
-- `ring`：单向环
-- `double_ring`：双向环
-
-支持的流量：
-
-- `uniform`：每个源节点随机选择另一个目的节点
-- `hotspot`：非热点节点以指定概率向热点节点发送消息
-
-## 批量实验与绘图
-
-```bash
-./noc/scripts/run_sweep.sh ./noc/build/noc_benchmark noc/noc_sweep.csv
-python3 ./noc/scripts/plot_sweep.py noc/noc_sweep.csv --out-dir noc/plots
-```
-
-绘图脚本会生成热点和均匀流量下的延迟、吞吐、阻塞周期、拥塞周期、送达比例和未送达消息等指标图。缺少 Matplotlib 时可运行：
-
-```bash
-python3 -m pip install matplotlib
-```
-
-## 许可证与来源
-
-NoC 模块采用 MIT License。NoC 模型源自 `nullrvsim` 总线/网络模型的设计与代码演化，仓库保留了原项目的版权声明和许可证。使用或再分发时请同时保留 `noc/LICENSE` 文件。
+NoC源自 `nullrvsim` 总线/网络模型的代码演化，保留 [noc/LICENSE](noc/LICENSE) 中的MIT声明。`rv64-archsem`来自 [meng-cz/rv64-archsem](https://github.com/meng-cz/rv64-archsem)，基于上游 `b26e726` 工作副本并包含本地修改，许可证见 [rv64-archsem/LICENSE](rv64-archsem/LICENSE)。第三方源码保留各自版权与许可声明。
