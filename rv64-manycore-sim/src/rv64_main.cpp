@@ -12,6 +12,7 @@
 namespace {
 
 struct Options {
+  std::string timing_table;
   std::string program_path;
   std::string workload = "unspecified";
   std::optional<std::string> csv_path;
@@ -48,6 +49,10 @@ std::string usage(const char* executable) {
       << "  --lat-alu/--lat-mul/--lat-div N\n"
       << "  --lat-branch/--lat-csr/--lat-memory/--lat-fence N\n"
       << "  --lat-vconfig/--lat-valu/--lat-vtransaction N\n"
+      << "  --timing-table PATH   per-instruction INI overrides and VL-scaled vector timing\n"
+      << "  --interconnect ring|shared --bus-arbitration rr|fixed\n"
+      << "  --bus-address-cycles N --bus-data-cycles N --bus-queue N\n"
+      << "  --mmio-depth N        adapter capacity (1=legacy, >1=result FIFO)\n"
       << "  --memory-latency N    memory service latency in ticks\n"
       << "  --memory-queue N      memory request queue capacity\n"
       << "  --max-ticks N         simulation timeout\n"
@@ -70,6 +75,13 @@ Options parse_options(int argc, char** argv) {
       return argv[i];
     };
     if (argument == "--cores") options.config.core_count = parse_u32(value(), argument);
+    else if (argument == "--timing-table") {options.timing_table=value();manycore::load_instruction_timing(options.timing_table,options.latency);}
+    else if (argument == "--interconnect") {auto s=value();if(s!="ring"&&s!="shared")throw std::runtime_error("interconnect must be ring/shared");options.config.shared_bus=s=="shared";}
+    else if (argument == "--bus-arbitration") {auto s=value();if(s!="rr"&&s!="fixed")throw std::runtime_error("arbitration must be rr/fixed");options.config.bus.fixed_priority=s=="fixed";}
+    else if (argument == "--bus-address-cycles") options.config.bus.address_cycles=parse_u32(value(),argument);
+    else if (argument == "--bus-data-cycles") options.config.bus.data_cycles=parse_u32(value(),argument);
+    else if (argument == "--bus-queue") options.config.bus.queue_depth=parse_u32(value(),argument);
+    else if (argument == "--mmio-depth") options.config.mmio_depth=parse_u32(value(),argument);
     else if (argument == "--tohost") options.config.tohost_address = parse_unsigned(value(), argument);
     else if (argument == "--link-width") options.config.link_width_bytes = parse_u32(value(), argument);
     else if (argument == "--route-latency") options.config.route_latency = parse_u32(value(), argument);
@@ -104,6 +116,7 @@ Options parse_options(int argc, char** argv) {
     }
   }
   const auto& l = options.latency;
+  options.config.bus.receive_slots=options.config.receive_message_slots;
   if (!l.integer_alu || !l.integer_multiply || !l.integer_divide || !l.branch_jump ||
       !l.csr || !l.memory_issue || !l.fence || !l.vector_config ||
       !l.vector_integer_alu || !l.vector_transaction_issue)
@@ -133,7 +146,7 @@ void append_csv(const std::string& path, const Options& options,
     existing.seekg(0);
     std::string header;
     std::getline(existing, header);
-    if (header.find("schema_version,receive_slots,") == std::string::npos)
+    if (header.find("schema_version,receive_slots,") == std::string::npos || header.find("interconnect,timing_table") == std::string::npos)
       throw std::runtime_error("CSV schema mismatch; choose a new result file");
   }
   std::ofstream output(path, std::ios::app);
@@ -151,7 +164,7 @@ void append_csv(const std::string& path, const Options& options,
               "fetch_decode,adapter_serialization_wait,vector_issue_wait,mmio_commands,"
               "mmio_completed,mmio_errors,mmio_injection_wait,mmio_response_wait,"
               "destination_credit_stalls,max_reserved_messages,memory_queued_request_cycles,"
-              "memory_service_cycles,memory_response_injection_wait\n";
+              "memory_service_cycles,memory_response_injection_wait,interconnect,timing_table,request_mean_latency,request_p99_latency,request_mean_injection_wait,hart_memory_wait_fraction,bus_utilization,bus_arbitration,bus_address_cycles,bus_data_cycles,bus_queue,mmio_depth,timing_model,mmio_mean_latency,mmio_p99_latency\n";
   }
   uint64_t retired = 0, execute_wait = 0, injection_blocked = 0, memory_wait = 0;
   uint64_t vector_config = 0, vector_alu = 0, vector_load = 0, vector_store = 0;
@@ -196,7 +209,7 @@ void append_csv(const std::string& path, const Options& options,
          << memory.completed_requests << ',' << memory.queue_full_cycles << ','
          << memory.max_queue_depth << ',' << throughput;
   const auto& l = options.latency;
-  output << ",2," << options.config.receive_message_slots << ',' << l.integer_alu
+  output << ",3," << options.config.receive_message_slots << ',' << l.integer_alu
          << ',' << l.integer_multiply << ',' << l.integer_divide << ',' << l.branch_jump
          << ',' << l.csr << ',' << l.memory_issue << ',' << l.fence << ',' << l.vector_config
          << ',' << l.vector_integer_alu << ',' << l.vector_transaction_issue
@@ -205,13 +218,24 @@ void append_csv(const std::string& path, const Options& options,
          << ',' << mmio.injection_wait << ',' << mmio.response_wait
          << ',' << noc.destination_credit_stalls << ',' << noc.max_reserved_messages
          << ',' << memory.queued_request_cycles << ',' << memory.service_cycles
-         << ',' << memory.response_injection_blocked_cycles << '\n';
+         << ',' << memory.response_injection_blocked_cycles;
+  manycore::Distribution dist;uint64_t hart_ticks=0;
+  for(uint32_t h=0;h<options.config.core_count;++h){auto& s=system.core(h).stats();hart_ticks+=s.ticks;for(auto [v,c]:s.request_latency.histogram){dist.histogram[v]+=c;dist.count+=c;dist.sum+=v*c;}}
+  manycore::Distribution md;for(uint32_t h=0;h<options.config.core_count;++h)for(auto [v,c]:system.core(h).mmio().stats().latency.histogram){md.histogram[v]+=c;md.count+=c;md.sum+=v*c;}
+  std::ostringstream model;model<<"vector.default="<<l.vector_base<<":"<<l.vector_lanes;
+  for(auto& [name,t]:l.instructions)model<<";"<<name<<"="<<t.base<<":"<<t.lanes;
+  output<<','<<(options.config.shared_bus?"shared":"ring")<<','<<csv_escape(options.timing_table)<<','<<dist.mean()<<','<<dist.p99()<<','<<(dist.count?double(injection_blocked)/dist.count:0)<<','<<(hart_ticks?double(memory_wait)/hart_ticks:0)<<','<<(system.shared_bus()?system.shared_bus()->utilization():0)
+        <<','<<(options.config.bus.fixed_priority?"fixed":"rr")<<','<<options.config.bus.address_cycles<<','<<options.config.bus.data_cycles<<','<<options.config.bus.queue_depth<<','<<options.config.mmio_depth<<','<<csv_escape(model.str())<<','<<md.mean()<<','<<md.p99()<<'\n';
 }
 
 void print_results(const Options& options, const manycore::Rv64ManycoreSystem& system,
                    bool completed, bool success) {
   std::cout << "completed=" << completed << " success=" << success
             << " ticks=" << system.current_tick() << '\n';
+  if(auto bus=system.shared_bus()){
+    std::cout<<"bus_busy="<<bus->busy_cycles<<" bus_idle="<<bus->idle_cycles<<" bus_utilization="<<bus->utilization()<<'\n';
+    size_t master=0;for(auto& s:bus->masters())std::cout<<"master="<<master++<<" requests="<<s.requests<<" grants="<<s.grants<<" waiting_request_cycles="<<s.wait_cycles<<" grant_wait_mean="<<s.grant_wait.mean()<<" grant_wait_p99="<<s.grant_wait.p99()<<" longest_wait="<<s.longest_wait<<" starvation_events="<<s.starvation_events<<'\n';
+  }
   for (uint32_t i = 0; i < options.config.core_count; ++i) {
     const auto& core = system.core(i);
     const auto& stats = core.stats();
@@ -228,6 +252,8 @@ void print_results(const Options& options, const manycore::Rv64ManycoreSystem& s
               << " execute_wait=" << stats.execute_wait_cycles
               << " injection_blocked=" << stats.injection_blocked_cycles
               << " memory_wait=" << stats.memory_wait_cycles
+              << " request_latency_mean="<<stats.request_latency.mean()<<" request_latency_p99="<<stats.request_latency.p99()
+              << " memory_wait_fraction="<<(stats.ticks?double(stats.memory_wait_cycles)/stats.ticks:0)
               << " vector_config=" << stats.vector_config_instructions
               << " vector_alu=" << stats.vector_alu_instructions
               << " vector_load=" << stats.vector_load_instructions

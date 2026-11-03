@@ -1,5 +1,9 @@
 # rv64-manycore-sim
 
+2026-11-03 新增逐指令周期表、VL/lanes向量时序、IBus双实现（SharedBus/RingNoC）、总线饱和实验、CSR通路和可配置并发MMIO。详见 [本轮实现与统计口径](docs/bus-timing-upgrade.md)。新配置入口：`python3 run.py all --config run-bus.ini`。旧配置默认保持兼容，CSV schema已升级为3，不能与旧数据追加混用。
+
+本轮15项自动测试、12组共享总线RVV扫描与36组总线饱和扫描的结果见 [验收记录](docs/acceptance-2026-11-03.md)。
+
 本版本新增每 Hart 独立的 MMIO 总线控制窗口（`0x90000000`）、可配置的目的端完整消息接收额度，以及命令行指令延迟参数。接口地址表、使用约定、时序限制和统计含义详见 [MMIO与背压说明](docs/mmio-and-backpressure.md)。
 
 本次测试与18组实验原始结果见 [2026-10-28验收记录](docs/acceptance-2026-10-28.md)。
@@ -93,7 +97,7 @@ mkdir -p build/results
   --workload vector_stream_private --csv build/results/private.csv
 ```
 
-可配置项覆盖核心数、链路宽度、路由延迟、路由缓冲、内存延迟、内存队列和最大模拟周期。`--receive-slots`控制目的端消息额度，默认2；`--lat-alu`、`--lat-mul`、`--lat-div`、`--lat-valu`等设置指令类别周期，完整列表见接口说明。CSV schema版本2包含配置、完成状态、Hart等待、RVV事务、MMIO、NoC与内存服务统计；不能追加到旧版CSV。
+可配置项覆盖核心数、链路宽度、路由延迟、路由缓冲、内存延迟、内存队列和最大模拟周期。`--receive-slots`控制目的端消息额度，默认2；`--lat-alu`等提供类别回退，`--timing-table`提供逐指令覆盖及VL/lanes模型。当前CSV schema版本3包含新时序与总线参数、每请求延迟及等待占比，不能追加到旧版CSV。
 
 ## 拥塞实验负载
 
@@ -141,7 +145,7 @@ bash scripts/build_rv64_example.sh examples/tohost_smoke.S build/examples
   --memory-latency 100 --memory-queue 1
 ```
 
-MMIO控制窗口与 `tohost` 不同：前者用于启动读写，后者用于裸机测试通过/失败上报。当前没有使用自定义CSR发起总线事务。完整地址表见 [接口说明](docs/mmio-and-backpressure.md)。
+MMIO控制窗口与 `tohost` 不同：前者用于启动读写，后者用于裸机测试通过/失败上报。当前同时提供自定义CSR通路，使用 `python3 run.py csr --config run-bus.ini` 验证。完整地址表见 [本轮说明](docs/bus-timing-upgrade.md)。
 
 ## 已支持的 RV64 范围
 

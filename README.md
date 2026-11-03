@@ -2,7 +2,9 @@
 
 本项目将支持部分 RV64I/M 与 V 扩展指令的 Atomic Hart、带背压的 NoC 和共享内存集成为一个逐周期模拟器，用于研究多核访存竞争、请求排队、网络阻塞和核心停顿。
 
-核心按指令类别使用预设执行周期。多个 Hart 在模拟时间上并发运行；模拟器使用单线程、确定性的全局 tick 推进状态。项目定位为可运行裸机程序的系统级拥塞实验基线。
+核心支持外置逐指令周期表，未配置的指令回退到类别周期；向量ALU可使用 `base + ceil(vl / lanes)`。互连支持共享总线仲裁与双环NoC两种实现。多个 Hart 在模拟时间上并发运行；模拟器使用单线程、确定性的全局 tick 推进状态。项目定位为可运行裸机程序的系统级拥塞实验基线。
+
+2026-11-03更新的实现、配置和统计边界见 [本轮说明](rv64-manycore-sim/docs/bus-timing-upgrade.md)，15项自动测试与总线饱和实验见 [验收记录](rv64-manycore-sim/docs/acceptance-2026-11-03.md)。
 
 ## 代码组成
 
@@ -24,9 +26,9 @@ simbus-noc/
 
 ```text
 多个 RV64+V Atomic Hart
-    │ 普通标量/向量访存，或MMIO适配器发起的目标事务
+    │ 普通标量/向量访存，或MMIO/CSR适配器发起的目标事务
     ↕
-带背压的 NoC（通道0：请求；通道1：响应）
+IBus：SharedBus共享总线 或 RingNoC双环网络
     ↕
 内存控制器（有限请求队列、固定服务周期）
     ↕
@@ -38,13 +40,14 @@ simbus-noc/
 - 可配置Hart数量，已验证1/2/4/8 Hart；每Hart有独立PC、整数/向量寄存器、CSR和 `mhartid`。
 - 支持RV64整数计算、分支、标量访存、乘除法和基础CSR；所有Hart使用同一份本地只读程序镜像，取指不产生NoC流量。
 - RVV子集：VLEN=256、SEW=8/16/32/64、LMUL=m1/m2/m4/m8；向量配置、基础整数加减/最值/逻辑/搬移，以及EEW=SEW的无掩码单位步长访存。
-- 指令类别延迟可配置：整数ALU默认1周期、乘法3周期、除法18周期、向量整数ALU4周期；取指、请求准备和动态等待另计。
-- 每Hart在 `0x90000000` 有独立MMIO控制窗口，可设置地址、数据和大小、启动总线读写并查询结果；未采用自定义CSR发起总线请求。
+- 支持 `isa-timing.ini` 逐指令周期覆盖与VL/lanes向量周期模型。无时序表时保持类别回退：整数ALU默认1周期、乘法3周期、除法18周期、向量整数ALU4周期；取指、请求准备和动态等待另计。
+- 每Hart在 `0x90000000` 有独立MMIO控制窗口，同时支持 `0x7c0` 起的自定义CSR通路；适配器深度可配置，支持多笔目标事务和带ID的完成结果FIFO。
+- SharedBus每次只授权一个发送者，地址拍和数据拍可配置，请求支持轮询/固定优先级；记录每master授权等待及全局忙闲利用率。响应优先，避免请求流饿死响应。
 - NoC库支持单环、双环、二维Mesh XY路由；当前众核系统使用双环。转发缓冲采用水位背压，众核默认每个目的端口/通道预留2条完整消息的接收额度。
 - `tohost` 特殊地址协议负责裸机程序通过/失败上报，与MMIO总线控制窗口是不同接口。
 - 输出每Hart统计及聚合CSV，覆盖执行、注入阻塞、响应等待、MMIO、NoC和内存队列指标。
 
-完整地址表、延迟参数与统计口径见 [MMIO与背压说明](rv64-manycore-sim/docs/mmio-and-backpressure.md)。
+完整地址表、时序参数、仲裁及统计口径见 [本轮实现说明](rv64-manycore-sim/docs/bus-timing-upgrade.md)。
 
 ## 快速开始
 
@@ -80,6 +83,16 @@ python3 run.py sweep       # 三类RVV负载扫描1/2/4/8核，共12组
 python3 run.py private --cores 8  # 临时覆盖核心数
 ```
 
+使用新增的共享总线、逐指令时序与快内存配置：
+
+```bash
+python3 run.py all --config run-bus.ini
+python3 run.py sweep --config run-bus.ini
+python3 run.py csr --config run-bus.ini
+```
+
+`run.ini`保留旧模式，`run-bus.ini`配置新模式，`isa-timing.ini`调整逐指令周期。普通/向量访存仍保持每Hart单未完成事务，并发能力由MMIO/CSR适配器提供。
+
 终端每组显示PASS/FAIL和总周期；完整日志、CSV和实际配置快照自动写入独立的 `build/results/时间戳-随机后缀/`，不会覆盖历史结果。`--dry-run`仅预览最终命令。原始命令行仍可用，详见 [运行说明](rv64-manycore-sim/README.md)。
 
 ### 批量复现实验
@@ -91,7 +104,16 @@ bash rv64-manycore-sim/scripts/run_system_acceptance.sh \
   rv64-manycore-sim/build rv64-manycore-sim/build/results/acceptance
 ```
 
-脚本运行三类RVV负载的1/2/4/8核扫描、四组MMIO读写和两组接收额度对照，共18组。已有结果目录不会被覆盖。CSV使用schema版本2，不能与旧版结果混合追加。独立网络构建、基准与绘图见 [NoC使用说明](noc/README.md)。
+脚本运行三类RVV负载的1/2/4/8核扫描、四组MMIO读写和两组接收额度对照，共18组。已有结果目录不会被覆盖。当前CSV使用schema版本3，不能向旧版结果追加。独立网络构建、基准与绘图见 [NoC使用说明](noc/README.md)。
+
+独立开放式总线饱和实验（在 `rv64-manycore-sim/` 目录执行，绘图需要matplotlib）：
+
+```bash
+./build/bus_saturation build/results/new-bus-saturation.csv
+python3 scripts/plot_bus_saturation.py build/results/new-bus-saturation.csv
+```
+
+正式 [CSV与三张图](rv64-manycore-sim/docs/results/2026-11-03/) 已随仓库保存。36组配置扫描显示总线饱和吞吐0.125请求/周期，此时总线利用率100%、内存忙占比12.5%、内存队列未满。过载延迟仅统计完成样本，不代表稳态均值。
 
 ## 验证结果
 
@@ -103,7 +125,7 @@ bash rv64-manycore-sim/scripts/run_system_acceptance.sh \
 | 众核系统 | 10/10项CTest通过，包含MMIO、额度、恢复、延迟与裸机测试 |
 | 系统实验 | 18/18组成功，原始CSV随仓库保存 |
 
-统一INI入口另有 `runner_ini_acceptance` 验收，覆盖参数继承、临时覆盖、短命令运行和历史结果保留；工具链与Python3齐备时，当前众核CTest总数为11。
+上述为历史验收。2026-11-03新增共享总线、逐指令周期、CSR与Fence等验证后，工具链与Python3齐备时，众核CTest为15/15通过，另有12组新总线RVV扫描与36组开放式饱和扫描，详见 [最新验收](rv64-manycore-sim/docs/acceptance-2026-11-03.md)。
 
 测试条件和逐规模结果见 [验收记录](rv64-manycore-sim/docs/acceptance-2026-10-28.md)，原始数据见 [实验CSV](rv64-manycore-sim/docs/results/2026-10-28/)。这些周期值来自简化模型，不是实际芯片性能测量。
 
@@ -112,10 +134,11 @@ bash rv64-manycore-sim/scripts/run_system_acceptance.sh \
 三类RVV负载均执行64轮“加载8个32位元素—每元素加1—存回”：Private使用每Hart私有地址，Hotspot使用共享地址，Compute Gap在每轮之间插入标量计算间隔。Compute Gap是计算与访存交替，不是DMA双缓冲或计算访存重叠。
 
 - 单内存控制器、单活动服务请求，没有Cache、多Bank或一致性；Private与Hotspot没有额外的地址冲突时序差异。
-- 每Hart普通/向量访存最多一个未完成事务，向量子事务串行发送。MMIO适配器也只保留一个目标事务；它忙时可继续本地计算和状态轮询，普通访存等待排空。
+- 每Hart普通/向量访存最多一个未完成事务，向量子事务串行发送。MMIO适配器默认深度1保留兼容行为，配置更大深度后可并发提交；忙时可继续本地计算和状态轮询，普通访存等待排空。Fence先排空本Hart事务，再执行固定周期。
 - RVV是受限子集，没有分数LMUL、浮点、索引/分段访存，也没有AMO/LR/SC、虚拟内存和完整操作系统环境。
 - 目的端额度属于简化接纳控制，额度检查即时可见，没有硬件额度返回延迟；测试通过不代表对任意拓扑的无死锁证明。
 - Hart等待与NoC节点阻塞是累计量，可能大于全局模拟周期；不能将所有指标直接相加。
+- 新增每请求平均值/p99及以各Hart活跃周期为分母的等待占比。示例时序参数尚未由真实芯片标定，共享总线采用固定事务拍数模型。
 
 ## 来源与许可证
 

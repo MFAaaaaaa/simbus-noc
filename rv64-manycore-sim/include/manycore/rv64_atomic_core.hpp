@@ -28,6 +28,7 @@ enum class Rv64CoreState {
 };
 
 struct Rv64CoreStats {
+  Distribution request_latency;
   uint64_t ticks = 0;
   uint64_t fetch_decode_cycles = 0;
   uint64_t adapter_serialization_wait_cycles = 0;
@@ -52,7 +53,7 @@ class Rv64AtomicCore {
                  const ProgramImage& program,
                  InstructionLatencyConfig latency = {},
                  uint64_t stack_top = 0x88000000ull,
-                 std::optional<uint64_t> tohost_address = std::nullopt);
+                 std::optional<uint64_t> tohost_address = std::nullopt, uint32_t mmio_depth = 1);
 
   void tick();
   bool halted() const { return state_ == Rv64CoreState::Halted; }
@@ -101,7 +102,7 @@ class Rv64AtomicCore {
   void write_vector_group(uint8_t base, const std::vector<uint64_t>& words);
   uint32_t vector_group_registers() const;
   bool handle_tohost_write(const MemoryRequest& request);
-  uint64_t read_csr(uint64_t address) const;
+  uint64_t read_csr(uint64_t address);
   void write_csr(uint64_t address, uint64_t value);
   void write_reg(uint8_t index, uint64_t value);
   void commit();
@@ -141,6 +142,7 @@ class Rv64AtomicCore {
   uint32_t cycles_left_ = 0;
   uint32_t vector_issue_left_ = 0;
   uint32_t next_transaction_id_ = 1;
+  std::optional<uint64_t> request_started_;
   int exit_code_ = 0;
   std::string stop_reason_;
   Rv64CoreStats stats_;

@@ -43,6 +43,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_library(manycore_sim
+  src/interconnect.cpp
   src/mmio_bus_adapter.cpp
   src/memory_protocol.cpp
   src/shared_memory.cpp
@@ -57,6 +58,15 @@ add_library(manycore_sim
 add_library(manycore::sim ALIAS manycore_sim)
 
 target_include_directories(manycore_sim PUBLIC include)
+file(STRINGS "${RV64_ARCHSEM_ROOT}/include/riscv64_insts.hpp" ISA_ENUM_LINES REGEX "^[ ]+[a-zA-Z0-9_]+ =")
+set(ISA_NAMES "")
+foreach(LINE IN LISTS ISA_ENUM_LINES)
+  string(REGEX MATCH "[a-zA-Z0-9_]+" NAME "${LINE}")
+  string(REPLACE "_" "." MNEMONIC "${NAME}")
+  string(APPEND ISA_NAMES "{rv64archsem::InstName::${NAME}, \"${MNEMONIC}\"},\n")
+endforeach()
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/instruction_names.inc" "${ISA_NAMES}")
+target_include_directories(manycore_sim PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(manycore_sim PUBLIC simbus::noc rv64archsem)
 target_compile_features(manycore_sim PUBLIC cxx_std_20)
 target_compile_options(manycore_sim PRIVATE
@@ -67,9 +77,14 @@ target_link_libraries(manycore_demo PRIVATE manycore::sim)
 
 add_executable(rv64_manycore_sim src/rv64_main.cpp)
 target_link_libraries(rv64_manycore_sim PRIVATE manycore::sim)
+add_executable(bus_saturation src/bus_saturation.cpp)
+target_link_libraries(bus_saturation PRIVATE manycore::sim)
 
 if(MANYCORE_BUILD_TESTS)
   enable_testing()
+  add_executable(bus_timing_tests tests/test_bus_timing.cpp)
+  target_link_libraries(bus_timing_tests PRIVATE manycore::sim)
+  add_test(NAME bus_timing_tests COMMAND bus_timing_tests "${CMAKE_CURRENT_SOURCE_DIR}/isa-timing.ini")
   add_executable(manycore_tests tests/test_manycore.cpp)
   target_link_libraries(manycore_tests PRIVATE manycore::sim)
   add_test(NAME manycore_tests COMMAND manycore_tests)
@@ -126,7 +141,7 @@ if(MANYCORE_BUILD_TESTS)
               "${VECTOR_MEMORY_EXAMPLE_BIN}" 4 0x80001000)
 
     set(VECTOR_CONTENTION_WORKLOADS
-        vector_stream_private vector_stream_hotspot vector_stream_gap mmio_bus_smoke)
+        vector_stream_private vector_stream_hotspot vector_stream_gap mmio_bus_smoke csr_bus_smoke)
     set(VECTOR_CONTENTION_BINS)
     foreach(WORKLOAD IN LISTS VECTOR_CONTENTION_WORKLOADS)
       set(WORKLOAD_BIN "${TOHOST_EXAMPLE_DIR}/${WORKLOAD}.bin")
@@ -153,8 +168,17 @@ if(MANYCORE_BUILD_TESTS)
                 --cores 4 --tohost 0x80001000 --receive-slots 1
                 --memory-latency 30 --memory-queue 1 --max-ticks 2000000)
     endforeach()
+    foreach(FABRIC ring shared)
+      add_test(NAME csr_bus_${FABRIC}
+        COMMAND $<TARGET_FILE:rv64_manycore_sim> "${TOHOST_EXAMPLE_DIR}/csr_bus_smoke.bin"
+        --cores 4 --tohost 0x80001000 --interconnect ${FABRIC} --mmio-depth 4
+        --memory-latency 100 --max-ticks 2000000)
+    endforeach()
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
+      add_test(NAME advanced_bus_timing
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_advanced.py"
+                $<TARGET_FILE:rv64_manycore_sim> "${TOHOST_EXAMPLE_DIR}")
       add_test(NAME runner_ini_acceptance
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_runner.py"
                 "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")

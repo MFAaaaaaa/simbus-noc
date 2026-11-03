@@ -18,7 +18,8 @@ class Rv64ManycoreSystem {
   const Rv64AtomicCore& core(size_t index) const { return *cores_.at(index); }
   MemoryController& memory_controller() { return memory_controller_; }
   const MemoryController& memory_controller() const { return memory_controller_; }
-  const simbus::SymmetricMultiChannelBus& noc() const { return noc_; }
+  const IBus& noc() const { return *bus_; }
+  const SharedBus* shared_bus() const {return dynamic_cast<const SharedBus*>(bus_.get());}
 
   void tick();
   bool finished() const;
@@ -36,7 +37,7 @@ class Rv64ManycoreSystem {
   ProgramImage program_;
   ManycoreConfig config_;
   simbus::BusPortT memory_port_;
-  simbus::SymmetricMultiChannelBus noc_;
+  std::unique_ptr<IBus> bus_;
   MemoryController memory_controller_;
   std::vector<std::unique_ptr<Rv64AtomicCore>> cores_;
   uint64_t current_tick_ = 0;

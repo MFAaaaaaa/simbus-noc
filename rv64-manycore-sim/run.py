@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import hashlib
 
 ROOT = pathlib.Path(__file__).resolve().parent
 SCENARIOS = ('private', 'hotspot', 'compute', 'mmio')
@@ -18,6 +19,8 @@ OPTIONS = (
     'lat-alu', 'lat-mul', 'lat-div', 'lat-branch', 'lat-csr', 'lat-memory',
     'lat-fence', 'lat-vconfig', 'lat-valu', 'lat-vtransaction',
 )
+EXTRA_OPTIONS = ('timing-table', 'interconnect', 'bus-arbitration', 'bus-address-cycles',
+                 'bus-data-cycles', 'bus-queue', 'mmio-depth')
 
 
 def positive(text):
@@ -34,16 +37,17 @@ def load_jobs(args):
     if parser.defaults():
         raise ValueError('请将公共参数放入[common]，不使用[DEFAULT]')
     sections = {'run', 'common', 'sweep', *SCENARIOS}
-    if set(parser.sections()) != sections:
-        raise ValueError('配置必须包含且仅包含这些段：' + ', '.join(sorted(sections)))
-    allowed = {'run': {'build_dir', 'timeout_seconds'}, 'common': set(OPTIONS),
+    if not sections.issubset(parser.sections()) or set(parser.sections())-sections-{'csr'}:
+        raise ValueError('配置必须包含这些段（可额外包含csr）：' + ', '.join(sorted(sections)))
+    allowed = {'run': {'build_dir', 'timeout_seconds'}, 'common': set(OPTIONS + EXTRA_OPTIONS),
                'sweep': {'cores'}}
-    allowed.update({name: set(OPTIONS) | {'program'} for name in SCENARIOS})
+    allowed.update({name: set(OPTIONS + EXTRA_OPTIONS) | {'program'} for name in SCENARIOS})
+    allowed['csr'] = set(OPTIONS + EXTRA_OPTIONS) | {'program'}
     for section in parser.sections():
         unknown = set(parser[section]) - allowed[section]
         if unknown:
             raise ValueError('未知配置项 [{}]: {}'.format(section, ', '.join(sorted(unknown))))
-    if set(parser['common']) != set(OPTIONS):
+    if not set(OPTIONS).issubset(parser['common']):
         raise ValueError('[common]需保留全部公共参数')
     timeout = int(parser['run']['timeout_seconds'])
     if timeout <= 0:
@@ -61,7 +65,9 @@ def load_jobs(args):
     jobs = []
     for name in names:
         values = dict(parser['common'])
-        values.update(parser[name])
+        if name == 'csr':
+            values.update({'program':'csr_bus_smoke.bin', 'mmio-depth':'4'})
+        if name in parser: values.update(parser[name])
         program = values.pop('program')
         if pathlib.Path(program).name != program or not program.endswith('.bin'):
             raise ValueError('program必须是build/examples下的.bin文件名')
@@ -69,6 +75,17 @@ def load_jobs(args):
             options = dict(values)
             options['cores'] = str(args.cores if args.cores is not None else core_count)
             for key, value in options.items():
+                if key == 'timing-table':
+                    timing = pathlib.Path(value)
+                    if not timing.is_absolute(): timing = args.config.resolve().parent / timing
+                    options[key] = str(timing.resolve())
+                    continue
+                if key == 'interconnect':
+                    if value not in ('shared', 'ring'): raise ValueError('interconnect必须为shared/ring')
+                    continue
+                if key == 'bus-arbitration':
+                    if value not in ('rr', 'fixed'): raise ValueError('bus-arbitration必须为rr/fixed')
+                    continue
                 number = int(value, 0)
                 if number < 0 or (number == 0 and key not in ('receive-slots', 'tohost')):
                     raise ValueError('{}: {}数值无效'.format(name, key))
@@ -84,6 +101,8 @@ def command(build, job, csv_path=None):
     cmd = [str(build / 'rv64_manycore_sim'), str(build / 'examples' / job['program'])]
     for key in OPTIONS:
         cmd.extend(('--' + key, job['options'][key]))
+    for key in EXTRA_OPTIONS:
+        if key in job['options']: cmd.extend(('--' + key, job['options'][key]))
     cmd.extend(('--workload', job['scene']))
     if csv_path is not None:
         cmd.extend(('--csv', str(csv_path)))
@@ -93,7 +112,7 @@ def command(build, job, csv_path=None):
 def main():
     args_parser = argparse.ArgumentParser(description='用run.ini统一配置众核拥塞实验')
     args_parser.add_argument('scene', nargs='?', default='private',
-                             choices=(*SCENARIOS, 'all', 'sweep'),
+                             choices=(*SCENARIOS, 'csr', 'all', 'sweep'),
                              help='默认private；all运行四个场景；sweep扫描三类RVV负载')
     args_parser.add_argument('--config', type=pathlib.Path, default=ROOT / 'run.ini')
     args_parser.add_argument('--cores', type=positive, help='临时覆盖核心数')
@@ -116,9 +135,16 @@ def main():
         stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-')
         output = pathlib.Path(tempfile.mkdtemp(prefix=stamp, dir=str(results)))
         csv_path = output / 'results.csv'
+        timing_sources = {}
+        for job in jobs:
+            timing_path = job['options'].get('timing-table')
+            if timing_path and timing_path not in timing_sources:
+                content = pathlib.Path(timing_path).read_bytes()
+                timing_sources[timing_path] = {'sha256': hashlib.sha256(content).hexdigest(),
+                                               'content': content.decode('utf-8-sig')}
         (output / 'configuration.json').write_text(
             json.dumps({'source_config': str(args.config.resolve()), 'timeout_seconds': timeout,
-                        'build_dir': str(build), 'jobs': jobs}, ensure_ascii=False, indent=2),
+                        'build_dir': str(build), 'jobs': jobs, 'timing_sources': timing_sources}, ensure_ascii=False, indent=2),
             encoding='utf-8')
         print('结果目录：{}'.format(output), flush=True)
         for index, job in enumerate(jobs, 1):

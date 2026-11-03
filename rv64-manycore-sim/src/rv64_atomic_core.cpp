@@ -119,7 +119,7 @@ Rv64AtomicCore::Rv64AtomicCore(uint32_t hart_id, simbus::BusInterfaceV2& bus,
                                const ProgramImage& program,
                                InstructionLatencyConfig latency,
                                uint64_t stack_top,
-                               std::optional<uint64_t> tohost_address)
+                               std::optional<uint64_t> tohost_address, uint32_t mmio_depth)
     : hart_id_(hart_id), bus_(bus), port_(port), memory_port_(memory_port),
       mmio_(hart_id, bus, port, memory_port),
       program_(program), latency_(latency), tohost_address_(tohost_address),
@@ -127,13 +127,18 @@ Rv64AtomicCore::Rv64AtomicCore(uint32_t hart_id, simbus::BusInterfaceV2& bus,
   if (latency_.vector_transaction_issue == 0)
     throw std::runtime_error("vector transaction issue latency must be non-zero");
   x_[2] = stack_top - static_cast<uint64_t>(hart_id) * 0x10000ull;
+  mmio_.set_depth(mmio_depth);
 }
 
 void Rv64AtomicCore::write_reg(uint8_t index, uint64_t value) {
   if (index != 0) x_[index] = value;
 }
 
-uint64_t Rv64AtomicCore::read_csr(uint64_t address) const {
+uint64_t Rv64AtomicCore::read_csr(uint64_t address) {
+  if(address>=0x7c0&&address<=0x7c7){
+    static const uint64_t offsets[]={0,24,8,40,32,16,64,72};
+    return address==0x7c7?0:mmio_.read(MmioBusAdapter::base+offsets[address-0x7c0],8);
+  }
   if (address == kCsrVstart) return vector_context_.vstart;
   if (address == kCsrVxsat) return vector_context_.vcsr & 1u;
   if (address == kCsrVxrm) return (vector_context_.vcsr >> 1) & 3u;
@@ -149,6 +154,11 @@ uint64_t Rv64AtomicCore::read_csr(uint64_t address) const {
 }
 
 void Rv64AtomicCore::write_csr(uint64_t address, uint64_t value) {
+  if(address>=0x7c0&&address<=0x7c7){
+    static const uint64_t offsets[]={0,24,8,40,32,16,64,72};
+    if(address==0x7c3||address==0x7c6)throw std::runtime_error("read-only bus CSR");
+    mmio_.write(MmioBusAdapter::base+offsets[address-0x7c0],8,value);return;
+  }
   if (address == kCsrVstart) {
     vector_context_.vstart = static_cast<uint32_t>(value);
     return;
@@ -185,7 +195,7 @@ void Rv64AtomicCore::fetch_decode() {
       return;
     }
     pending_ = PendingInstruction{decoded, raw, pc_, pc_ + 4};
-    cycles_left_ = instruction_latency(decoded, latency_);
+    cycles_left_ = instruction_latency(decoded, latency_, vector_context_.vl);
     state_ = Rv64CoreState::ExecuteWait;
   } catch (const std::exception& error) {
     fault(error.what());
@@ -193,6 +203,12 @@ void Rv64AtomicCore::fetch_decode() {
 }
 
 void Rv64AtomicCore::advance_execute() {
+  // In-order ordinary requests finish before the next instruction is fetched.
+  // Fence first drains ALL adapter transactions, then consumes its fixed delay.
+  const auto ct=pending_->decoded.controlType;
+  if((ct==rv64archsem::ControlType::fence||ct==rv64archsem::ControlType::fencei||ct==rv64archsem::ControlType::fence_tso)&&mmio_.busy()){
+    ++stats_.adapter_serialization_wait_cycles;return;
+  }
   if (cycles_left_ > 0) {
     --cycles_left_;
     ++stats_.execute_wait_cycles;
@@ -644,6 +660,7 @@ void Rv64AtomicCore::issue_memory_request() {
   // The adapter has priority until its response is consumed. Local status
   // polling still proceeds; normal and vector requests cannot steal responses.
   if (mmio_.busy()) { ++stats_.adapter_serialization_wait_cycles; return; }
+  if(!request_started_)request_started_=stats_.ticks;
   if (!bus_.can_send(port_, kRequestChannel)) {
     ++stats_.injection_blocked_cycles;
     return;
@@ -672,6 +689,7 @@ void Rv64AtomicCore::receive_memory_response() {
       throw std::runtime_error("unexpected memory response");
     }
     if (response.status != MemoryStatus::Ok) throw std::runtime_error("memory request failed");
+    if(request_started_){stats_.request_latency.add(stats_.ticks-*request_started_);request_started_.reset();}
     if (vector_memory_active_) {
       finish_vector_memory_response(response);
       return;

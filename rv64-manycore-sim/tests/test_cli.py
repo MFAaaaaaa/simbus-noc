@@ -30,7 +30,7 @@ with tempfile.TemporaryDirectory(prefix='manycore-cli-') as folder:
     for row, cores in zip(rows, (1, 2, 4, 8)):
         assert None not in row, row
         assert row['workload'] == 'mmio,roundtrip'
-        assert row['schema_version'] == '2'
+        assert row['schema_version'] == '3'
         assert row['success'] == '1'
         assert int(row['mmio_completed']) == cores * 2
         assert int(row['adapter_serialization_wait']) > 0

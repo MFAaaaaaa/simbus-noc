@@ -39,23 +39,22 @@ simbus::NocConfig Rv64ManycoreSystem::make_noc_config(const ManycoreConfig& conf
 Rv64ManycoreSystem::Rv64ManycoreSystem(ProgramImage program, ManycoreConfig config,
                                        InstructionLatencyConfig latency)
     : program_(std::move(program)), config_(config), memory_port_(config.core_count),
-      noc_(make_ports(config.core_count), make_nodes(config.core_count),
-           {config.link_width_bytes, config.link_width_bytes}, make_route(config.core_count),
-           make_noc_config(config), "rv64-manycore-noc"),
-      memory_controller_(noc_, memory_port_,
+      bus_(config.shared_bus?std::unique_ptr<IBus>(new SharedBus(config.core_count+1,config.bus)):
+           std::unique_ptr<IBus>(new RingNoC(config.core_count,make_noc_config(config)))),
+      memory_controller_(*bus_, memory_port_,
                          MemoryControllerConfig{config.memory_latency,
                                                 config.memory_queue_capacity}) {
   if (config.core_count == 0) throw std::runtime_error("RV64 system needs at least one core");
   for (uint32_t hart = 0; hart < config.core_count; ++hart) {
-    cores_.emplace_back(new Rv64AtomicCore(hart, noc_, hart, memory_port_, program_, latency,
-                                           0x88000000ull, config.tohost_address));
+    cores_.emplace_back(new Rv64AtomicCore(hart, *bus_, hart, memory_port_, program_, latency,
+                                           0x88000000ull, config.tohost_address,config.mmio_depth));
   }
 }
 
 void Rv64ManycoreSystem::tick() {
   memory_controller_.tick();
   for (auto& core : cores_) core->tick();
-  noc_.apply_next_tick();
+  bus_->apply_next_tick();
   ++current_tick_;
 }
 

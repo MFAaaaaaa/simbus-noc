@@ -3,6 +3,7 @@
 #include "manycore/atomic_core.hpp"
 #include "manycore/memory_controller.hpp"
 #include "simbus/symmulcha.h"
+#include "manycore/interconnect.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -12,6 +13,9 @@
 namespace manycore {
 
 struct ManycoreConfig {
+  bool shared_bus = false;
+  SharedBusConfig bus;
+  uint32_t mmio_depth = 1;
   uint32_t core_count = 2;
   uint32_t receive_message_slots = 2;
   uint32_t link_width_bytes = 16;
